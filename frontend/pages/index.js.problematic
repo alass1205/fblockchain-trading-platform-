@@ -1,0 +1,484 @@
+import { useState, useEffect } from 'react';
+import { ethers } from 'ethers';
+import Link from 'next/link';
+
+export default function Home() {
+    const [account, setAccount] = useState('');
+    const [isConnected, setIsConnected] = useState(false);
+    const [isConnecting, setIsConnecting] = useState(false);
+    const [userRegistered, setUserRegistered] = useState(false);
+    const [showRegistration, setShowRegistration] = useState(false);
+    const [networkInfo, setNetworkInfo] = useState(null);
+    const [formData, setFormData] = useState({
+        legalName: '',
+        passportFile: null
+    });
+
+    // Vérifier si MetaMask est connecté au chargement
+    useEffect(() => {
+        checkWalletConnection();
+        
+        // Écouter les changements de compte MetaMask
+        if (typeof window.ethereum !== 'undefined') {
+            window.ethereum.on('accountsChanged', handleAccountsChanged);
+            window.ethereum.on('chainChanged', handleChainChanged);
+            window.ethereum.on('disconnect', handleDisconnect);
+        }
+
+        // Nettoyage des listeners
+        return () => {
+            if (typeof window.ethereum !== 'undefined') {
+                window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
+                window.ethereum.removeListener('chainChanged', handleChainChanged);
+                window.ethereum.removeListener('disconnect', handleDisconnect);
+            }
+        };
+    }, []);
+
+    // Gestion des changements de compte
+    const handleAccountsChanged = (accounts) => {
+        if (accounts.length === 0) {
+            // Utilisateur s'est déconnecté
+            handleDisconnect();
+        } else if (accounts[0] !== account) {
+            // Changement de compte
+            setAccount(accounts[0]);
+            checkUserRegistration(accounts[0]);
+            checkNetwork();
+        }
+    };
+
+    // Gestion du changement de réseau
+    const handleChainChanged = (chainId) => {
+        window.location.reload();
+    };
+
+    // Gestion de la déconnexion
+    const handleDisconnect = () => {
+        setAccount('');
+        setIsConnected(false);
+        setUserRegistered(false);
+        setShowRegistration(false);
+        setNetworkInfo(null);
+    };
+
+    async function checkWalletConnection() {
+        if (typeof window.ethereum !== 'undefined') {
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+                if (accounts.length > 0) {
+                    setAccount(accounts[0]);
+                    setIsConnected(true);
+                    await checkNetwork();
+                    await checkUserRegistration(accounts[0]);
+                }
+            } catch (error) {
+                console.error('Erreur lors de la vérification du wallet:', error);
+            }
+        }
+    }
+
+    async function checkNetwork() {
+        try {
+            const provider = new ethers.providers.Web3Provider(window.ethereum);
+            const network = await provider.getNetwork();
+            setNetworkInfo(network);
+            
+            // Vérifier si on est sur le bon réseau (Hardhat = 31337)
+            if (network.chainId !== 31337) {
+                alert('Veuillez vous connecter au réseau Hardhat Local (Chain ID: 31337)');
+            }
+        } catch (error) {
+            console.error('Erreur réseau:', error);
+        }
+    }
+
+    async function connectWallet() {
+        if (typeof window.ethereum === 'undefined') {
+            alert('MetaMask n\'est pas installé! Veuillez l\'installer d\'abord.');
+            return;
+        }
+
+        setIsConnecting(true);
+        try {
+            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+            setAccount(accounts[0]);
+            setIsConnected(true);
+            await checkNetwork();
+            await checkUserRegistration(accounts[0]);
+        } catch (error) {
+            console.error('Erreur lors de la connexion:', error);
+            if (error.code === 4001) {
+                alert('Connexion refusée par l\'utilisateur');
+            } else {
+                alert('Erreur lors de la connexion au wallet');
+            }
+        } finally {
+            setIsConnecting(false);
+        }
+    }
+
+    async function disconnectWallet() {
+        // Note: MetaMask ne permet pas la déconnexion programmatique
+        // On peut seulement réinitialiser l'état local
+        handleDisconnect();
+        alert('Déconnecté localement. Pour vous déconnecter complètement, utilisez MetaMask directement.');
+    }
+
+    async function checkUserRegistration(address) {
+        try {
+            const response = await fetch(`http://localhost:3001/api/user/${address}`);
+            const userData = await response.json();
+            
+            if (userData && userData.legal_name) {
+                setUserRegistered(true);
+                setShowRegistration(false);
+            } else {
+                setUserRegistered(false);
+                setShowRegistration(true);
+            }
+        } catch (error) {
+            console.error('Erreur lors de la vérification utilisateur:', error);
+            setShowRegistration(true);
+        }
+    }
+
+    async function handleRegistration(e) {
+        e.preventDefault();
+        
+        if (!formData.legalName) {
+            alert('Veuillez saisir votre nom légal');
+            return;
+        }
+
+        const formDataToSend = new FormData();
+        formDataToSend.append('walletAddress', account);
+        formDataToSend.append('legalName', formData.legalName);
+        if (formData.passportFile) {
+            formDataToSend.append('passport', formData.passportFile);
+        }
+
+        try {
+            const response = await fetch('http://localhost:3001/api/register', {
+                method: 'POST',
+                body: formDataToSend
+            });
+
+            const result = await response.json();
+            
+            if (result.success) {
+                setUserRegistered(true);
+                setShowRegistration(false);
+                alert('Inscription réussie!');
+            } else {
+                alert('Erreur lors de l\'inscription: ' + (result.error || 'Erreur inconnue'));
+            }
+        } catch (error) {
+            console.error('Erreur lors de l\'inscription:', error);
+            alert('Erreur lors de l\'inscription. Vérifiez que le backend est démarré.');
+        }
+    }
+
+    return (
+        <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', minHeight: '100vh' }}>
+            <header style={{ 
+                borderBottom: '2px solid #007bff', 
+                paddingBottom: '20px', 
+                marginBottom: '30px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+            }}>
+                <div>
+                    <h1 style={{ color: '#333', margin: 0 }}>🏛️ Blockchain Trading Platform</h1>
+                    <p style={{ color: '#666', margin: '5px 0 0 0' }}>
+                        Plateforme de trading d'instruments financiers sur blockchain
+                    </p>
+                </div>
+                
+                {/* Boutons de connexion/déconnexion */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    {isConnected ? (
+                        <>
+                            <div style={{ 
+                                backgroundColor: '#d4edda', 
+                                padding: '8px 12px', 
+                                borderRadius: '5px',
+                                fontSize: '14px'
+                            }}>
+                                <strong>🟢 {account.slice(0, 6)}...{account.slice(-4)}</strong>
+                                {networkInfo && (
+                                    <div style={{ fontSize: '12px', color: '#666' }}>
+                                        Réseau: {networkInfo.name} (ID: {networkInfo.chainId})
+                                    </div>
+                                )}
+                            </div>
+                            <button 
+                                onClick={disconnectWallet}
+                                style={{
+                                    padding: '8px 16px',
+                                    backgroundColor: '#dc3545',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '5px',
+                                    cursor: 'pointer',
+                                    fontSize: '14px'
+                                }}
+                            >
+                                Se déconnecter
+                            </button>
+                        </>
+                    ) : (
+                        <button 
+                            onClick={connectWallet}
+                            disabled={isConnecting}
+                            style={{
+                                padding: '10px 20px',
+                                fontSize: '16px',
+                                backgroundColor: isConnecting ? '#6c757d' : '#007bff',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '5px',
+                                cursor: isConnecting ? 'not-allowed' : 'pointer'
+                            }}
+                        >
+                            {isConnecting ? 'Connexion...' : '🦊 Connecter MetaMask'}
+                        </button>
+                    )}
+                </div>
+            </header>
+
+            <main>
+                {!isConnected ? (
+                    <div style={{ textAlign: 'center', padding: '60px 20px' }}>
+                        <div style={{ 
+                            backgroundColor: '#f8f9fa', 
+                            padding: '40px', 
+                            borderRadius: '10px',
+                            maxWidth: '600px',
+                            margin: '0 auto'
+                        }}>
+                            <h2 style={{ color: '#333', marginBottom: '20px' }}>
+                                Bienvenue sur la plateforme de trading
+                            </h2>
+                            <p style={{ color: '#666', fontSize: '18px', marginBottom: '30px' }}>
+                                Connectez votre wallet MetaMask pour accéder aux instruments financiers sur blockchain
+                            </p>
+                            
+                            <div style={{ 
+                                backgroundColor: '#fff3cd', 
+                                padding: '15px', 
+                                borderRadius: '5px',
+                                marginBottom: '20px',
+                                border: '1px solid #ffeaa7'
+                            }}>
+                                <strong>⚠️ Configuration requise:</strong>
+                                <ul style={{ textAlign: 'left', margin: '10px 0' }}>
+                                    <li>MetaMask installé</li>
+                                    <li>Réseau: Hardhat Local (http://127.0.0.1:8545)</li>
+                                    <li>Chain ID: 31337</li>
+                                </ul>
+                            </div>
+                            
+                            {typeof window !== 'undefined' && typeof window.ethereum === 'undefined' && (
+                                <div style={{ 
+                                    backgroundColor: '#f8d7da', 
+                                    padding: '15px', 
+                                    borderRadius: '5px',
+                                    marginBottom: '20px',
+                                    border: '1px solid #f5c6cb'
+                                }}>
+                                    <strong>❌ MetaMask non détecté</strong>
+                                    <p>Veuillez installer MetaMask pour continuer</p>
+                                    <a 
+                                        href="https://metamask.io/download/" 
+                                        target="_blank" 
+                                        rel="noopener noreferrer"
+                                        style={{ color: '#007bff' }}
+                                    >
+                                        Télécharger MetaMask
+                                    </a>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                ) : showRegistration ? (
+                    <div style={{ maxWidth: '600px', margin: '0 auto' }}>
+                        <div style={{ 
+                            backgroundColor: '#f8f9fa', 
+                            padding: '30px', 
+                            borderRadius: '10px',
+                            border: '1px solid #dee2e6'
+                        }}>
+                            <h2 style={{ color: '#333', marginBottom: '15px' }}>📝 Inscription requise</h2>
+                            <p style={{ color: '#666', marginBottom: '25px' }}>
+                                Veuillez fournir vos informations pour utiliser la plateforme
+                            </p>
+                            
+                            <form onSubmit={handleRegistration}>
+                                <div style={{ marginBottom: '20px' }}>
+                                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
+                                        Nom légal *
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={formData.legalName}
+                                        onChange={(e) => setFormData({...formData, legalName: e.target.value})}
+                                        required
+                                        placeholder="Votre nom complet"
+                                        style={{ 
+                                            width: '100%', 
+                                            padding: '12px', 
+                                            border: '1px solid #ced4da',
+                                            borderRadius: '5px',
+                                            fontSize: '16px'
+                                        }}
+                                    />
+                                </div>
+                                
+                                <div style={{ marginBottom: '25px' }}>
+                                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
+                                        Photo de passeport (optionnel)
+                                    </label>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        onChange={(e) => setFormData({...formData, passportFile: e.target.files[0]})}
+                                        style={{ 
+                                            width: '100%', 
+                                            padding: '12px', 
+                                            border: '1px solid #ced4da',
+                                            borderRadius: '5px'
+                                        }}
+                                    />
+                                    <small style={{ color: '#6c757d' }}>
+                                        Format accepté: JPG, PNG, GIF (max 5MB)
+                                    </small>
+                                </div>
+                                
+                                <button 
+                                    type="submit"
+                                    style={{
+                                        width: '100%',
+                                        padding: '12px 20px',
+                                        backgroundColor: '#28a745',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '5px',
+                                        cursor: 'pointer',
+                                        fontSize: '16px',
+                                        fontWeight: 'bold'
+                                    }}
+                                >
+                                    ✅ S'inscrire sur la plateforme
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                ) : (
+                    <div>
+                        <div style={{ 
+                            backgroundColor: '#d4edda', 
+                            padding: '20px', 
+                            borderRadius: '8px',
+                            marginBottom: '30px',
+                            border: '1px solid #c3e6cb'
+                        }}>
+                            <h3 style={{ margin: '0 0 10px 0', color: '#155724' }}>
+                                ✅ Connexion réussie !
+                            </h3>
+                            <p style={{ margin: 0, color: '#155724' }}>
+                                Wallet: <strong>{account}</strong> | 
+                                Réseau: <strong>{networkInfo?.name || 'Inconnu'}</strong>
+                            </p>
+                        </div>
+
+                        <h2 style={{ color: '#333', marginBottom: '20px' }}>🚀 Navigation</h2>
+                        <div style={{ 
+                            display: 'grid', 
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+                            gap: '20px' 
+                        }}>
+                            <Link href="/portfolio" style={{ textDecoration: 'none' }}>
+                                <div style={{ 
+                                    border: '2px solid #007bff', 
+                                    padding: '25px', 
+                                    borderRadius: '10px',
+                                    backgroundColor: '#f8f9fa',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.3s ease',
+                                    ':hover': { transform: 'translateY(-2px)' }
+                                }}>
+                                    <h3 style={{ color: '#007bff', margin: '0 0 10px 0' }}>📊 Portfolio</h3>
+                                    <p style={{ color: '#666', margin: 0 }}>
+                                        Consultez vos actifs et effectuez des retraits
+                                    </p>
+                                </div>
+                            </Link>
+
+                            <Link href="/assets/CLV" style={{ textDecoration: 'none' }}>
+                                <div style={{ 
+                                    border: '2px solid #28a745', 
+                                    padding: '25px', 
+                                    borderRadius: '10px',
+                                    backgroundColor: '#f8f9fa',
+                                    cursor: 'pointer'
+                                }}>
+                                    <h3 style={{ color: '#28a745', margin: '0 0 10px 0' }}>🏢 Actions CLV</h3>
+                                    <p style={{ color: '#666', margin: 0 }}>
+                                        Tradez les actions Clove Company
+                                    </p>
+                                </div>
+                            </Link>
+
+                            <Link href="/assets/ROO" style={{ textDecoration: 'none' }}>
+                                <div style={{ 
+                                    border: '2px solid #17a2b8', 
+                                    padding: '25px', 
+                                    borderRadius: '10px',
+                                    backgroundColor: '#f8f9fa',
+                                    cursor: 'pointer'
+                                }}>
+                                    <h3 style={{ color: '#17a2b8', margin: '0 0 10px 0' }}>🌿 Actions ROO</h3>
+                                    <p style={{ color: '#666', margin: 0 }}>
+                                        Tradez les actions Rooibos Limited
+                                    </p>
+                                </div>
+                            </Link>
+
+                            <Link href="/assets/GOV" style={{ textDecoration: 'none' }}>
+                                <div style={{ 
+                                    border: '2px solid #ffc107', 
+                                    padding: '25px', 
+                                    borderRadius: '10px',
+                                    backgroundColor: '#f8f9fa',
+                                    cursor: 'pointer'
+                                }}>
+                                    <h3 style={{ color: '#856404', margin: '0 0 10px 0' }}>🏛️ Obligations GOV</h3>
+                                    <p style={{ color: '#666', margin: 0 }}>
+                                        Tradez les obligations gouvernementales
+                                    </p>
+                                </div>
+                            </Link>
+
+                            <Link href="/faq" style={{ textDecoration: 'none' }}>
+                                <div style={{ 
+                                    border: '2px solid #6f42c1', 
+                                    padding: '25px', 
+                                    borderRadius: '10px',
+                                    backgroundColor: '#f8f9fa',
+                                    cursor: 'pointer'
+                                }}>
+                                    <h3 style={{ color: '#6f42c1', margin: '0 0 10px 0' }}>❓ FAQ</h3>
+                                    <p style={{ color: '#666', margin: 0 }}>
+                                        Comment utiliser la plateforme
+                                    </p>
+                                </div>
+                            </Link>
+                        </div>
+                    </div>
+                )}
+            </main>
+        </div>
+    );
+}

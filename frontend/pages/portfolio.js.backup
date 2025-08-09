@@ -1,0 +1,200 @@
+import { useState, useEffect } from 'react';
+import { ethers } from 'ethers';
+import Link from 'next/link';
+
+export default function Portfolio() {
+    const [account, setAccount] = useState('');
+    const [balances, setBalances] = useState({
+        TRG: { wallet: '0', platform: '0' },
+        CLV: { wallet: '0', platform: '0' },
+        ROO: { wallet: '0', platform: '0' },
+        GOV: { wallet: '0', platform: '0' }
+    });
+    const [portfolioValue, setPortfolioValue] = useState(0);
+
+    useEffect(() => {
+        checkWallet();
+    }, []);
+
+    async function checkWallet() {
+        if (typeof window.ethereum !== 'undefined') {
+            const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+            if (accounts.length > 0) {
+                setAccount(accounts[0]);
+                await loadBalances(accounts[0]);
+            }
+        }
+    }
+
+    async function loadBalances(userAddress) {
+        try {
+            const provider = new ethers.providers.Web3Provider(window.ethereum);
+            
+            // Adresses des contrats (à adapter selon vos contrats déployés)
+            const contracts = {
+                TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+                CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+                ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+                GOV: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+                VAULT: "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+            };
+
+            // ABI simple pour ERC20
+            const erc20ABI = [
+                "function balanceOf(address owner) view returns (uint256)",
+                "function symbol() view returns (string)"
+            ];
+
+            // ABI pour les obligations
+            const bondABI = [
+                "function getBondsByOwner(address owner) view returns (uint256[])"
+            ];
+
+            const newBalances = { ...balances };
+
+            // Récupérer les balances TRG, CLV, ROO
+            for (const [symbol, address] of Object.entries(contracts)) {
+                if (symbol !== 'VAULT' && symbol !== 'GOV') {
+                    const contract = new ethers.Contract(address, erc20ABI, provider);
+                    const balance = await contract.balanceOf(userAddress);
+                    newBalances[symbol].wallet = ethers.utils.formatEther(balance);
+                }
+            }
+
+            // Récupérer les obligations GOV
+            const govContract = new ethers.Contract(contracts.GOV, bondABI, provider);
+            const bonds = await govContract.getBondsByOwner(userAddress);
+            newBalances.GOV.wallet = bonds.length.toString();
+
+            setBalances(newBalances);
+
+            // Calculer la valeur du portfolio (prix par défaut)
+            const prices = { TRG: 1, CLV: 10, ROO: 10, GOV: 200 };
+            let totalValue = 0;
+            Object.entries(newBalances).forEach(([symbol, balance]) => {
+                totalValue += parseFloat(balance.wallet) * prices[symbol];
+            });
+            setPortfolioValue(totalValue);
+
+        } catch (error) {
+            console.error('Erreur lors du chargement des balances:', error);
+        }
+    }
+
+    async function withdrawAsset(symbol) {
+        alert(`Fonction de retrait pour ${symbol} - À implémenter avec le vault`);
+    }
+
+    if (!account) {
+        return (
+            <div style={{ padding: '20px' }}>
+                <p>Veuillez connecter votre wallet d'abord.</p>
+                <Link href="/">Retour à l'accueil</Link>
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
+            <header style={{ borderBottom: '1px solid #ccc', paddingBottom: '20px', marginBottom: '30px' }}>
+                <h1>📊 Portfolio</h1>
+                <p>Wallet connecté: {account.slice(0, 6)}...{account.slice(-4)}</p>
+                <Link href="/" style={{ color: '#007bff', textDecoration: 'none' }}>← Retour à l'accueil</Link>
+            </header>
+
+            <div style={{ marginBottom: '30px' }}>
+                <h2>Valeur totale du portfolio: {portfolioValue.toFixed(2)} TRG</h2>
+            </div>
+
+            <div style={{ marginBottom: '30px' }}>
+                <h3>Vos actifs</h3>
+                <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid #ddd' }}>
+                    <thead>
+                        <tr style={{ backgroundColor: '#f8f9fa' }}>
+                            <th style={{ padding: '12px', border: '1px solid #ddd' }}>Actif</th>
+                            <th style={{ padding: '12px', border: '1px solid #ddd' }}>Sur Plateforme</th>
+                            <th style={{ padding: '12px', border: '1px solid #ddd' }}>Total Disponible</th>
+                            <th style={{ padding: '12px', border: '1px solid #ddd' }}>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {Object.entries(balances).map(([symbol, balance]) => (
+                            <tr key={symbol}>
+                                <td style={{ padding: '12px', border: '1px solid #ddd' }}>
+                                    <Link href={`/assets/${symbol}`} style={{ color: '#007bff', textDecoration: 'none' }}>
+                                        {symbol}
+                                    </Link>
+                                </td>
+                                <td style={{ padding: '12px', border: '1px solid #ddd' }}>
+                                    {balance.platform}
+                                    {parseFloat(balance.platform) > 0 && (
+                                        <button 
+                                            onClick={() => withdrawAsset(symbol)}
+                                            style={{
+                                                marginLeft: '10px',
+                                                padding: '5px 10px',
+                                                backgroundColor: '#dc3545',
+                                                color: 'white',
+                                                border: 'none',
+                                                borderRadius: '3px',
+                                                cursor: 'pointer',
+                                                fontSize: '12px'
+                                            }}
+                                        >
+                                            ⬇️ Retirer
+                                        </button>
+                                    )}
+                                </td>
+                                <td style={{ padding: '12px', border: '1px solid #ddd' }}>{balance.wallet}</td>
+                                <td style={{ padding: '12px', border: '1px solid #ddd' }}>
+                                    <Link href={`/assets/${symbol}`}>
+                                        <button style={{
+                                            padding: '5px 10px',
+                                            backgroundColor: '#007bff',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '3px',
+                                            cursor: 'pointer'
+                                        }}>
+                                            Trader
+                                        </button>
+                                    </Link>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            <div style={{ marginTop: '30px' }}>
+                <h3>Visualisation du portfolio</h3>
+                <div style={{ 
+                    display: 'grid', 
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+                    gap: '20px',
+                    marginTop: '20px'
+                }}>
+                    {Object.entries(balances).map(([symbol, balance]) => {
+                        const prices = { TRG: 1, CLV: 10, ROO: 10, GOV: 200 };
+                        const value = parseFloat(balance.wallet) * prices[symbol];
+                        const percentage = portfolioValue > 0 ? (value / portfolioValue * 100).toFixed(1) : 0;
+                        
+                        return (
+                            <div key={symbol} style={{
+                                border: '1px solid #ddd',
+                                padding: '15px',
+                                borderRadius: '8px',
+                                backgroundColor: '#f8f9fa'
+                            }}>
+                                <h4>{symbol}</h4>
+                                <p>Quantité: {balance.wallet}</p>
+                                <p>Valeur: {value.toFixed(2)} TRG</p>
+                                <p>Pourcentage: {percentage}%</p>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    );
+}

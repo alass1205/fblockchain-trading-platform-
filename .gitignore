@@ -1,0 +1,28 @@
+# Node modules (dans racine et sous-dossiers principaux)
+node_modules/
+/frontend/node_modules/
+/backend/node_modules/
+/contracts/node_modules/
+/contracts/artifacts/
+/contracts/cache/
+
+# Environment files
+.env
+frontend/.env
+backend/.env
+contracts/.env
+
+# Hardhat files
+/cache
+/artifacts
+
+# TypeChain files
+/typechain
+/typechain-types
+
+# solidity-coverage files
+/coverage
+/coverage.json
+
+# Hardhat Ignition default folder for deployments against a local node
+ignition/deployments/chain-31337

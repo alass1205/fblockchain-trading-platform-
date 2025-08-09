@@ -1,0 +1,19 @@
+{
+  "name": "blockchain-trading-platform",
+  "version": "1.0.0",
+  "description": "Financial instruments trading platform on private blockchain",
+  "main": "index.js",
+  "scripts": {
+    "install-all": "npm install && cd frontend && npm install && cd ../backend && npm install",
+    "deploy-network": "./scripts/deploy-network.sh",
+    "deploy-contracts": "cd contracts && npx hardhat run scripts/deploy.js --network localhost",
+    "populate": "cd contracts && npx hardhat run scripts/populate.js --network localhost",
+    "start-backend": "cd backend && npm start",
+    "start-frontend": "cd frontend && npm start",
+    "start": "concurrently \"npm run start-backend\" \"npm run start-frontend\"",
+    "test": "cd contracts && npx hardhat test"
+  },
+  "devDependencies": {
+    "concurrently": "^7.6.0"
+  }
+}
