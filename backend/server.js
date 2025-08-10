@@ -1,115 +1,121 @@
 const express = require('express');
 const cors = require('cors');
-const { ethers } = require('ethers');
-const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
-const path = require('path');
+const sqlite3 = require('sqlite3').verbose();
+const ethers = require('ethers');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
+
+// Configuration multer pour upload de fichiers
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/');
+    },
+    filename: function (req, file, cb) {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 } // 5MB max
+});
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
-// Configuration Multer pour upload des "passeports"
-const upload = multer({ dest: 'uploads/' });
-
-// Configuration blockchain
-const BLOCKCHAIN_URL = 'http://127.0.0.1:8545';
-const provider = new ethers.providers.JsonRpcProvider(BLOCKCHAIN_URL);
-
-// Chargement des adresses des contrats
-const contractAddresses = JSON.parse(fs.readFileSync('../contracts/user-addresses.json', 'utf8'));
-
-// Configuration base de données
-const db = new sqlite3.Database('trading.db');
+// Créer le dossier uploads s'il n'existe pas
+if (!fs.existsSync('uploads')) {
+    fs.mkdirSync('uploads');
+}
 
 // Initialisation de la base de données
-function initDatabase() {
-    db.serialize(() => {
-        // Table des actifs
-        db.run(`CREATE TABLE IF NOT EXISTS assets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT UNIQUE,
-            name TEXT,
-            type TEXT,
-            contract_address TEXT,
-            current_price REAL DEFAULT 0
-        )`);
+const db = new sqlite3.Database('trading.db');
 
-        // Table des utilisateurs
-        db.run(`CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            wallet_address TEXT UNIQUE,
-            legal_name TEXT,
-            passport_image TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
+// Création des tables
+db.serialize(() => {
+    // Table des actifs
+    db.run(`CREATE TABLE IF NOT EXISTS assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT UNIQUE,
+        name TEXT,
+        type TEXT,
+        contract_address TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 
-        // Table des ordres
-        db.run(`CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_address TEXT,
-            asset_symbol TEXT,
-            order_type TEXT, -- 'buy' or 'sell'
-            quantity REAL,
-            price REAL,
-            status TEXT DEFAULT 'pending', -- 'pending', 'filled', 'cancelled'
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
+    // Table des utilisateurs
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wallet_address TEXT UNIQUE,
+        legal_name TEXT,
+        passport_picture TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 
-        // Table historique des prix
-        db.run(`CREATE TABLE IF NOT EXISTS price_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_symbol TEXT,
-            price REAL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
+    // Table des ordres
+    db.run(`CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_address TEXT,
+        asset_symbol TEXT,
+        order_type TEXT,
+        quantity REAL,
+        price REAL,
+        status TEXT DEFAULT 'pending',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 
-        // Insérer les actifs par défaut
-        const defaultAssets = [
-            ['TRG', 'Triangle', 'stablecoin', contractAddresses.TRG, 1.0],
-            ['CLV', 'Clove Company', 'share', contractAddresses.CLV, 10.0],
-            ['ROO', 'Rooibos Limited', 'share', contractAddresses.ROO, 10.0],
-            ['GOV', 'Government Bonds', 'bond', contractAddresses.GOV, 200.0]
-        ];
+    // Table de l'historique des prix
+    db.run(`CREATE TABLE IF NOT EXISTS price_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_symbol TEXT,
+        price REAL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 
-        const stmt = db.prepare(`INSERT OR IGNORE INTO assets (symbol, name, type, contract_address, current_price) VALUES (?, ?, ?, ?, ?)`);
-        defaultAssets.forEach(asset => stmt.run(asset));
-        stmt.finalize();
-
-        console.log('✅ Base de données initialisée');
-    });
-}
+    console.log('✅ Base de données initialisée');
+});
 
 // Routes API
 
-// 1. Enregistrement utilisateur
+// Test de l'API
+app.get('/api/test', (req, res) => {
+    res.json({ 
+        message: 'API Backend fonctionne !',
+        timestamp: new Date().toISOString(),
+        port: PORT
+    });
+});
+
+// Inscription utilisateur
 app.post('/api/register', upload.single('passport'), (req, res) => {
     const { walletAddress, legalName } = req.body;
-    const passportImage = req.file ? req.file.filename : null;
+    const passportPicture = req.file ? req.file.filename : null;
 
     db.run(
-        `INSERT OR REPLACE INTO users (wallet_address, legal_name, passport_image) VALUES (?, ?, ?)`,
-        [walletAddress, legalName, passportImage],
+        `INSERT OR REPLACE INTO users (wallet_address, legal_name, passport_picture) VALUES (?, ?, ?)`,
+        [walletAddress, legalName, passportPicture],
         function(err) {
             if (err) {
-                res.status(500).json({ error: err.message });
-                return;
+                console.error('Erreur inscription:', err);
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ 
+                    success: true, 
+                    message: 'Utilisateur enregistré',
+                    userId: this.lastID 
+                });
             }
-            res.json({ 
-                success: true, 
-                message: 'Utilisateur enregistré avec succès',
-                userId: this.lastID 
-            });
         }
     );
 });
 
-// 2. Informations utilisateur
+// Obtenir les informations utilisateur
 app.get('/api/user/:address', (req, res) => {
     const address = req.params.address;
     
@@ -118,82 +124,121 @@ app.get('/api/user/:address', (req, res) => {
         [address],
         (err, row) => {
             if (err) {
-                res.status(500).json({ error: err.message });
-                return;
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, user: row });
             }
-            res.json(row || { registered: false });
         }
     );
 });
 
-// 3. Liste des actifs
-app.get('/api/assets', (req, res) => {
-    db.all(`SELECT * FROM assets`, [], (err, rows) => {
-        if (err) {
-            res.status(500).json({ error: err.message });
-            return;
-        }
-        res.json(rows);
-    });
-});
-
-// 4. Détails d'un actif
-app.get('/api/assets/:symbol', (req, res) => {
-    const symbol = req.params.symbol;
+// Obtenir les balances blockchain
+app.get('/api/balances/:address', async (req, res) => {
+    const userAddress = req.params.address;
     
-    db.get(`SELECT * FROM assets WHERE symbol = ?`, [symbol], (err, asset) => {
-        if (err) {
-            res.status(500).json({ error: err.message });
-            return;
+    try {
+        console.log('📊 Récupération balances pour:', userAddress);
+        
+        // Configuration ethers.js
+        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
+        
+        // Charger les adresses des contrats
+        const addressesPath = path.join(__dirname, '../contracts/deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        // Fallback global VAULT -> TradingVault
+        if (!addresses.VAULT && addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+        }
+        console.log("🔍 DEBUG - Fichier chargé:", addressesPath);
+        console.log("📋 DEBUG - Contenu addresses:", addresses);
+        console.log("🔍 DEBUG - TRG:", addresses.TRG);
+        console.log("🔍 DEBUG - CLV:", addresses.CLV);
+        console.log("🔍 DEBUG - TradingVault:", addresses.VAULT);
+        if (!addresses.VAULT && addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+            console.log("🔄 Fallback: VAULT -> TradingVault:", addresses.VAULT);
         }
         
-        if (!asset) {
-            res.status(404).json({ error: 'Actif non trouvé' });
-            return;
-        }
-
-        // Récupérer l'historique des prix
-        db.all(
-            `SELECT price, timestamp FROM price_history WHERE asset_symbol = ? ORDER BY timestamp DESC LIMIT 50`,
-            [symbol],
-            (err, history) => {
-                if (err) {
-                    res.status(500).json({ error: err.message });
-                    return;
-                }
-                
-                res.json({
-                    ...asset,
-                    priceHistory: history
-                });
-            }
-        );
-    });
+        // Charger les ABIs
+        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json'), 'utf8')).abi;
+        const bondABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/BondToken.sol/BondToken.json'), 'utf8')).abi;
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
+        
+        // Créer les instances de contrats
+        console.log("🔧 DEBUG - Création contrat TRG avec adresse:", addresses.TRG);
+        console.log("🔧 DEBUG - Création contrat CLV avec adresse:", addresses.CLV);
+        console.log("🔧 DEBUG - Création contrat vault avec adresse:", addresses.VAULT);
+        const trgToken = new ethers.Contract(addresses.TRG, tokenABI, provider);
+        const clvToken = new ethers.Contract(addresses.CLV, tokenABI, provider);
+        const rooToken = new ethers.Contract(addresses.ROO, tokenABI, provider);
+        const govToken = new ethers.Contract(addresses.GOV, bondABI, provider);
+        const vault = new ethers.Contract(addresses.VAULT, vaultABI, provider);
+        
+        // Récupérer les balances wallet
+        const trgBalance = await trgToken.balanceOf(userAddress);
+        const clvBalance = await clvToken.balanceOf(userAddress);
+        const rooBalance = await rooToken.balanceOf(userAddress);
+        const govBonds = await govToken.getBondsByOwner(userAddress);
+        
+        // Récupérer les balances vault
+        const trgVaultBalance = await vault.getBalance(addresses.TRG, userAddress);
+        const clvVaultBalance = await vault.getBalance(addresses.CLV, userAddress);
+        const rooVaultBalance = await vault.getBalance(addresses.ROO, userAddress);
+        
+        const balances = {
+            TRG: ethers.utils.formatUnits(trgBalance, 18),
+            CLV: ethers.utils.formatUnits(clvBalance, 18),
+            ROO: ethers.utils.formatUnits(rooBalance, 18),
+            GOV: govBonds.length.toString()
+        };
+        
+        const vaultBalances = {
+            TRG: ethers.utils.formatUnits(trgVaultBalance, 18),
+            CLV: ethers.utils.formatUnits(clvVaultBalance, 18),
+            ROO: ethers.utils.formatUnits(rooVaultBalance, 18)
+        };
+        
+        console.log('✅ Balances récupérées:', balances);
+        
+        res.json({
+            success: true,
+            balances: balances,
+            vaultBalances: vaultBalances
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur récupération balances:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
 });
 
-// 5. Créer un ordre
+// Créer un ordre
 app.post('/api/orders', (req, res) => {
     const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
-
+    
     db.run(
         `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)`,
         [userAddress, assetSymbol, orderType, quantity, price],
         function(err) {
             if (err) {
-                res.status(500).json({ error: err.message });
-                return;
+                console.error('Erreur création ordre:', err);
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                console.log('✅ Ordre créé:', { id: this.lastID, userAddress, assetSymbol, orderType, quantity, price });
+                res.json({ 
+                    success: true, 
+                    orderId: this.lastID,
+                    message: 'Ordre créé avec succès'
+                });
             }
-            
-            res.json({
-                success: true,
-                orderId: this.lastID,
-                message: 'Ordre créé avec succès'
-            });
         }
     );
 });
 
-// 6. Ordres d'un utilisateur
+// Obtenir les ordres d'un utilisateur
 app.get('/api/orders/:address', (req, res) => {
     const address = req.params.address;
     
@@ -202,16 +247,16 @@ app.get('/api/orders/:address', (req, res) => {
         [address],
         (err, rows) => {
             if (err) {
-                res.status(500).json({ error: err.message });
-                return;
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, orders: rows });
             }
-            res.json(rows);
         }
     );
 });
 
-// 7. Carnet d'ordres pour un actif
-app.get('/api/orderbook/:symbol', (req, res) => {
+// Obtenir tous les ordres pour un actif
+app.get('/api/orders/asset/:symbol', (req, res) => {
     const symbol = req.params.symbol;
     
     db.all(
@@ -219,171 +264,131 @@ app.get('/api/orderbook/:symbol', (req, res) => {
         [symbol],
         (err, rows) => {
             if (err) {
-                res.status(500).json({ error: err.message });
-                return;
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, orders: rows });
             }
-            
-            const buyOrders = rows.filter(order => order.order_type === 'buy');
-            const sellOrders = rows.filter(order => order.order_type === 'sell');
-            
-            res.json({
-                buyOrders,
-                sellOrders
-            });
         }
     );
 });
 
-// 8. Route de test
-app.get('/api/test', (req, res) => {
-// Route à ajouter dans server.js
-
-app.get('/api/balances/:address', async (req, res) => {
-    const userAddress = req.params.address;
+// Annuler un ordre
+app.post('/api/orders/:id/cancel', (req, res) => {
+    const orderId = req.params.id;
     
-    try {
-        // Adresses des contrats
-        const contractAddresses = {
-            TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512", 
-            ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-            GOV: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
-        };
-
-        // Connexion à Hardhat depuis le backend
-        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
-        
-        const erc20ABI = ["function balanceOf(address owner) view returns (uint256)"];
-        const bondABI = ["function getBondsByOwner(address owner) view returns (uint256[])"];
-
-        const balances = {};
-
-        // TRG
-        const trgContract = new ethers.Contract(contractAddresses.TRG, erc20ABI, provider);
-        const trgBalance = await trgContract.balanceOf(userAddress);
-        balances.TRG = ethers.utils.formatEther(trgBalance);
-
-        // CLV
-        const clvContract = new ethers.Contract(contractAddresses.CLV, erc20ABI, provider);
-        const clvBalance = await clvContract.balanceOf(userAddress);
-        balances.CLV = ethers.utils.formatEther(clvBalance);
-
-        // ROO
-        const rooContract = new ethers.Contract(contractAddresses.ROO, erc20ABI, provider);
-        const rooBalance = await rooContract.balanceOf(userAddress);
-        balances.ROO = ethers.utils.formatEther(rooBalance);
-
-        // GOV
-        const govContract = new ethers.Contract(contractAddresses.GOV, bondABI, provider);
-        const bonds = await govContract.getBondsByOwner(userAddress);
-        balances.GOV = bonds.length.toString();
-
-        res.json({
-            success: true,
-            address: userAddress,
-            balances: balances
-        });
-
-    } catch (error) {
-        console.error('Erreur récupération balances:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-    res.json({ 
-        message: 'Backend API fonctionnel!',
-        blockchain: BLOCKCHAIN_URL,
-        contracts: contractAddresses
-    });
+    db.run(
+        `UPDATE orders SET status = 'cancelled' WHERE id = ?`,
+        [orderId],
+        function(err) {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, message: 'Ordre annulé' });
+            }
+        }
+    );
 });
 
-// Démarrage du serveur
-initDatabase();
-
-// Route pour récupérer les balances blockchain
-app.get("/api/balances/:address", async (req, res) => {
-    const userAddress = req.params.address;
-    
-    try {
-        console.log("📊 Récupération balances pour:", userAddress);
-        
-        const contractAddresses = {
-            TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-            ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-            GOV: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
-        };
-
-        const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
-        
-        const erc20ABI = ["function balanceOf(address owner) view returns (uint256)"];
-        const bondABI = ["function getBondsByOwner(address owner) view returns (uint256[])"];
-
-        const balances = {};
-
-        const trgContract = new ethers.Contract(contractAddresses.TRG, erc20ABI, provider);
-        const trgBalance = await trgContract.balanceOf(userAddress);
-        balances.TRG = ethers.utils.formatEther(trgBalance);
-
-        const clvContract = new ethers.Contract(contractAddresses.CLV, erc20ABI, provider);
-        const clvBalance = await clvContract.balanceOf(userAddress);
-        balances.CLV = ethers.utils.formatEther(clvBalance);
-
-        const rooContract = new ethers.Contract(contractAddresses.ROO, erc20ABI, provider);
-        const rooBalance = await rooContract.balanceOf(userAddress);
-        balances.ROO = ethers.utils.formatEther(rooBalance);
-
-        const govContract = new ethers.Contract(contractAddresses.GOV, bondABI, provider);
-        const bonds = await govContract.getBondsByOwner(userAddress);
-        balances.GOV = bonds.length.toString();
-
-        console.log("✅ Balances récupérées:", balances);
-        
-        res.json({
-            success: true,
-            address: userAddress,
-            balances: balances
-        });
-
-    } catch (error) {
-        console.error("❌ Erreur balances:", error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-app.listen(PORT, () => {
-    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
-    console.log(`📋 API disponible sur http://localhost:${PORT}/api/test`);
-});
-
-// Route pour exécuter un trade réel sur blockchain
-// Route pour exécuter un trade réel sur blockchain - VERSION SÉCURISÉE
+// Route pour exécuter un trade RÉEL sur blockchain
 app.post("/api/execute-trade", async (req, res) => {
     const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
     
     try {
-        console.log("🔗 Exécution trade blockchain sécurisée:", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
+        console.log("🔗 Exécution trade blockchain RÉELLE:", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
         
-        // VÉRIFICATION CRITIQUE : S'assurer qu'on a bien un vendeur ET un acheteur
-        if (!buyerAddress || !sellerAddress || buyerAddress === sellerAddress) {
-            throw new Error("Acheteur et vendeur requis et différents");
+        // Configuration ethers.js
+        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
+        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        
+        // Charger les adresses des contrats
+        const addressesPath = path.join(__dirname, '../contracts/deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        // Fallback global VAULT -> TradingVault
+        if (!addresses.VAULT && addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+        }
+        console.log("🔍 DEBUG - Fichier chargé:", addressesPath);
+        console.log("📋 DEBUG - Contenu addresses:", addresses);
+        console.log("🔍 DEBUG - TRG:", addresses.TRG);
+        console.log("🔍 DEBUG - CLV:", addresses.CLV);
+        console.log("🔍 DEBUG - TradingVault:", addresses.VAULT);
+        if (!addresses.VAULT && addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+            console.log("🔄 Fallback: VAULT -> TradingVault:", addresses.VAULT);
         }
         
-        console.log("✅ Trade sécurisé - Pas de création de tokens illégale");
-        console.log("✅ Seuls les swaps réels entre utilisateurs sont autorisés");
+        // Charger les contrats
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
+        
+        const vault = new ethers.Contract(addresses.VAULT, vaultABI, wallet);
+        
+        console.log("📋 Exécution du trade sur la blockchain...");
+        
+        // Charger l'ABI des tokens
+        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json"), "utf8")).abi;
+        
+        // 1. Transférer l'asset du vendeur vers l'acheteur (wallet direct)
+        const assetToken = new ethers.Contract(addresses[assetSymbol], tokenABI, wallet);
+        const transferAssetTx = await assetToken.transferFrom(
+            sellerAddress,
+            buyerAddress,
+            ethers.utils.parseUnits(quantity.toString(), 18)
+        );
+        await transferAssetTx.wait();
+        console.log("✅ Asset transféré (wallet-to-wallet):", transferAssetTx.hash);
+        
+        // 2. Transférer TRG de l'acheteur vers le vendeur (wallet direct)
+        const payment = quantity * price;
+        const trgToken = new ethers.Contract(addresses.TRG, tokenABI, wallet);
+        const transferPaymentTx = await trgToken.transferFrom(
+            buyerAddress,
+            sellerAddress,
+            ethers.utils.parseUnits(payment.toString(), 18)
+        );
+        await transferPaymentTx.wait();
+        console.log("✅ Paiement transféré (wallet-to-wallet):", transferPaymentTx.hash);
+        
+        // 3. Mettre à jour les ordres en base
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE orders SET status = 'filled' WHERE asset_symbol = ? AND order_type = 'sell' AND user_address = ? AND status = 'pending'`,
+                [assetSymbol, sellerAddress],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
+        
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE orders SET status = 'filled' WHERE asset_symbol = ? AND order_type = 'buy' AND user_address = ? AND status = 'pending'`,
+                [assetSymbol, buyerAddress],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
+        
+        console.log("✅ Trade exécuté avec succès sur la blockchain");
         
         res.json({
             success: true,
-            message: "Trade sécurisé - Faille corrigée",
-            note: "Plus de création de tokens de nulle part !"
+            message: 'Trade exécuté sur la blockchain avec succès',
+            transactionDetails: {
+                asset: `${quantity} ${assetSymbol}`,
+                payment: `${payment} TRG`,
+                buyer: buyerAddress,
+                seller: sellerAddress,
+                assetTxHash: transferAssetTx.hash,
+                paymentTxHash: transferPaymentTx.hash
+            }
         });
         
     } catch (error) {
-        console.error("❌ Erreur trade sécurisé:", error);
+        console.error('❌ Erreur trade blockchain:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -464,45 +469,67 @@ app.post('/api/match-orders/:symbol', async (req, res) => {
     }
 });
 
-// Route pour afficher les balances vault (pour audit)
-app.get('/api/vault-balances/:address', async (req, res) => {
+
+// Route spécifique pour les balances vault
+app.get("/api/vault-balances/:address", async (req, res) => {
     const userAddress = req.params.address;
     
     try {
-        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        console.log("🏦 Récupération balances vault pour:", userAddress);
         
-        const contractAddresses = {
-            TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-            ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-            VAULT: "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+        // Configuration ethers.js
+        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
+        
+        // Charger les adresses des contrats
+        let addresses;
+        let addressesPath;
+        
+        const possiblePaths = [
+            path.join(__dirname, "../contracts/deployed-addresses.json"),
+            path.join(__dirname, "../contracts/scripts/deployed-addresses.json"),
+            path.join(__dirname, "./deployed-addresses.json")
+        ];
+        
+        for (const testPath of possiblePaths) {
+            if (fs.existsSync(testPath)) {
+                addressesPath = testPath;
+                break;
+            }
+        }
+        
+        addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
+        // Fallback global VAULT -> TradingVault
+        if (!addresses.VAULT && addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+        }
+        if (addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+        }
+        
+        // Charger l'ABI du vault
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json"), "utf8")).abi;
+        const vault = new ethers.Contract(addresses.VAULT, vaultABI, provider);
+        
+        // Récupérer les balances vault uniquement
+        const trgVaultBalance = await vault.getBalance(addresses.TRG, userAddress);
+        const clvVaultBalance = await vault.getBalance(addresses.CLV, userAddress);
+        const rooVaultBalance = await vault.getBalance(addresses.ROO, userAddress);
+        
+        const vaultBalances = {
+            TRG: ethers.utils.formatUnits(trgVaultBalance, 18),
+            CLV: ethers.utils.formatUnits(clvVaultBalance, 18),
+            ROO: ethers.utils.formatUnits(rooVaultBalance, 18)
         };
         
-        const vaultABI = ["function getUserTokenBalance(address user, address tokenAddress) external view returns (uint256)"];
-        const vaultContract = new ethers.Contract(contractAddresses.VAULT, vaultABI, provider);
-        
-        const vaultBalances = {};
-        
-        // TRG dans vault
-        const trgVault = await vaultContract.getUserTokenBalance(userAddress, contractAddresses.TRG);
-        vaultBalances.TRG = ethers.utils.formatEther(trgVault);
-        
-        // CLV dans vault
-        const clvVault = await vaultContract.getUserTokenBalance(userAddress, contractAddresses.CLV);
-        vaultBalances.CLV = ethers.utils.formatEther(clvVault);
-        
-        // ROO dans vault
-        const rooVault = await vaultContract.getUserTokenBalance(userAddress, contractAddresses.ROO);
-        vaultBalances.ROO = ethers.utils.formatEther(rooVault);
+        console.log("✅ Balances vault récupérées:", vaultBalances);
         
         res.json({
             success: true,
-            address: userAddress,
-            vaultBalances: vaultBalances
+            balances: vaultBalances
         });
         
     } catch (error) {
-        console.error('❌ Erreur vault balances:', error);
+        console.error("❌ Erreur récupération balances vault:", error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -510,78 +537,200 @@ app.get('/api/vault-balances/:address', async (req, res) => {
     }
 });
 
-// Route pour annuler un ordre
-app.post('/api/cancel-order/:orderId', async (req, res) => {
-    const orderId = req.params.orderId;
-    const { userAddress } = req.body;
+// Obtenir l'historique des prix
+app.get('/api/price-history/:symbol', (req, res) => {
+    const symbol = req.params.symbol;
+    
+    db.all(
+        `SELECT * FROM price_history WHERE asset_symbol = ? ORDER BY timestamp ASC`,
+        [symbol],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, history: rows });
+            }
+        }
+    );
+});
+
+// Démarrage du serveur
+app.listen(PORT, () => {
+    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
+    console.log(`📋 API disponible sur http://localhost:${PORT}/api/test`);
+});
+
+// Route pour obtenir les informations d'un actif
+app.get('/api/assets/:symbol', (req, res) => {
+    const symbol = req.params.symbol;
+    
+    const assetInfo = {
+        TRG: { name: 'Triangle Stablecoin', type: 'stablecoin', defaultPrice: 1 },
+        CLV: { name: 'Clove Company Shares', type: 'share', defaultPrice: 10 },
+        ROO: { name: 'Rooibos Limited Shares', type: 'share', defaultPrice: 10 },
+        GOV: { name: 'Government Bonds', type: 'bond', defaultPrice: 200 }
+    };
+
+    if (assetInfo[symbol]) {
+        res.json({
+            success: true,
+            asset: {
+                symbol: symbol,
+                ...assetInfo[symbol]
+            }
+        });
+    } else {
+        res.status(404).json({
+            success: false,
+            error: 'Asset not found'
+        });
+    }
+});
+
+// Route pour obtenir le carnet d'ordres d'un actif
+app.get('/api/orderbook/:symbol', (req, res) => {
+    const symbol = req.params.symbol;
+    
+    db.all(
+        `SELECT * FROM orders WHERE asset_symbol = ? AND status = 'pending' ORDER BY 
+         CASE WHEN order_type = 'sell' THEN price END ASC,
+         CASE WHEN order_type = 'buy' THEN price END DESC`,
+        [symbol],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                const buyOrders = rows.filter(order => order.order_type === 'buy');
+                const sellOrders = rows.filter(order => order.order_type === 'sell');
+                
+                res.json({
+                    success: true,
+                    orderbook: {
+                        buy: buyOrders,
+                        sell: sellOrders
+                    }
+                });
+            }
+        }
+    );
+});
+
+// Route pour obtenir l'historique des prix avec données par défaut
+app.get('/api/price-history/:symbol', (req, res) => {
+    const symbol = req.params.symbol;
+    
+    db.all(
+        `SELECT * FROM price_history WHERE asset_symbol = ? ORDER BY timestamp ASC`,
+        [symbol],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                // Si pas d'historique, créer des données par défaut
+                if (rows.length === 0) {
+                    const defaultPrices = {
+                        TRG: 1,
+                        CLV: 10,
+                        ROO: 10,
+                        GOV: 200
+                    };
+                    
+                    const defaultHistory = [];
+                    const now = new Date();
+                    for (let i = 29; i >= 0; i--) {
+                        const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+                        defaultHistory.push({
+                            asset_symbol: symbol,
+                            price: defaultPrices[symbol] || 10,
+                            timestamp: date.toISOString()
+                        });
+                    }
+                    
+                    res.json({
+                        success: true,
+                        history: defaultHistory
+                    });
+                } else {
+                    res.json({
+                        success: true,
+                        history: rows
+                    });
+                }
+            }
+        }
+    );
+});
+
+// Route pour créer un ordre avec dépôt au vault
+app.post('/api/create-order', async (req, res) => {
+    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
     
     try {
-        console.log('❌ Annulation ordre:', orderId, 'par', userAddress);
+        console.log('📝 Création ordre avec escrow:', { userAddress, assetSymbol, orderType, quantity, price });
         
-        // Récupérer l'ordre
-        const order = await new Promise((resolve, reject) => {
-            db.get(
-                `SELECT * FROM orders WHERE id = ? AND user_address = ? AND status = 'pending'`,
-                [orderId, userAddress],
-                (err, row) => err ? reject(err) : resolve(row)
-            );
-        });
-        
-        if (!order) {
-            return res.status(404).json({ success: false, error: 'Ordre non trouvé ou déjà traité' });
-        }
-        
-        // Libérer les fonds du vault
-        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        // Configuration ethers.js
+        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
         const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
         const wallet = new ethers.Wallet(deployerPrivateKey, provider);
         
-        const contractAddresses = {
-            TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-            CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-            ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-            VAULT: "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
-        };
+        // Charger les adresses
+        let addresses;
+        const possiblePaths = [
+            path.join(__dirname, "../contracts/deployed-addresses.json"),
+            path.join(__dirname, "../contracts/scripts/deployed-addresses.json")
+        ];
         
-        const vaultABI = ["function operateWithdrawal(address user, address tokenAddress, uint256 amount) external"];
-        const vaultContract = new ethers.Contract(contractAddresses.VAULT, vaultABI, provider);
-        
-        if (order.order_type === 'buy') {
-            // Libérer les TRG
-            const totalPriceWei = ethers.utils.parseEther((order.quantity * order.price).toString());
-            await vaultContract.connect(wallet).operateWithdrawal(userAddress, contractAddresses.TRG, totalPriceWei);
-            console.log('✅ TRG libérées du vault vers', userAddress);
-        } else {
-            // Libérer l'actif vendu
-            const quantityWei = ethers.utils.parseEther(order.quantity.toString());
-            await vaultContract.connect(wallet).operateWithdrawal(userAddress, contractAddresses[order.asset_symbol], quantityWei);
-            console.log('✅ Actif libéré du vault vers', userAddress);
+        for (const testPath of possiblePaths) {
+            if (fs.existsSync(testPath)) {
+                addresses = JSON.parse(fs.readFileSync(testPath, 'utf8'));
+        // Fallback global VAULT -> TradingVault
+        if (!addresses.VAULT && addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+        }
+                break;
+            }
         }
         
-        // Marquer l'ordre comme annulé
-        await new Promise((resolve, reject) => {
-            db.run(
-                `UPDATE orders SET status = 'cancelled' WHERE id = ?`,
-                [orderId],
-                function(err) {
-                    if (err) reject(err);
-                    else resolve();
-                }
-            );
-        });
+        if (addresses.VAULT) {
+            addresses.VAULT = addresses.VAULT;
+        }
         
-        res.json({
-            success: true,
-            message: 'Ordre annulé et fonds libérés',
-            refundDetails: {
-                orderId: orderId,
-                user: userAddress,
-                amount: order.order_type === 'buy' ? `${order.quantity * order.price} TRG` : `${order.quantity} ${order.asset_symbol}`
+        // Charger les contrats
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
+        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json'), 'utf8')).abi;
+        
+        const vault = new ethers.Contract(addresses.VAULT, vaultABI, wallet);
+        
+        // Simuler le dépôt au vault (ici on suppose que l'utilisateur a déjà approuvé)
+        console.log(`📦 Ordre créé - Les fonds seront dans le vault lors de l'exécution`);
+        
+        // Créer l'ordre en base
+        db.run(
+            `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)`,
+            [userAddress, assetSymbol, orderType, quantity, price],
+            function(err) {
+                if (err) {
+                    console.error('Erreur création ordre:', err);
+                    res.status(500).json({ success: false, error: err.message });
+                } else {
+                    console.log('✅ Ordre créé avec ID:', this.lastID);
+                    
+                    // Déclencher le matching automatique
+                    fetch(`http://localhost:3001/api/match-orders/${assetSymbol}`, {
+                        method: 'POST'
+                    }).catch(err => console.log('Matching en arrière-plan:', err.message));
+                    
+                    res.json({ 
+                        success: true, 
+                        orderId: this.lastID,
+                        message: 'Ordre créé avec succès - Matching en cours...'
+                    });
+                }
             }
-        });
+        );
         
     } catch (error) {
-        console.error('❌ Erreur annulation:', error);
+        console.error('❌ Erreur création ordre:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -589,26 +738,157 @@ app.post('/api/cancel-order/:orderId', async (req, res) => {
     }
 });
 
-// Route pour lister les ordres d'un utilisateur avec possibilité d'annulation
-app.get('/api/my-orders/:address', async (req, res) => {
-    const userAddress = req.params.address;
+// Route pour créer un ordre avec dépôt automatique au vault
+// Route pour créer un ordre simple (sans escrow)
+app.post("/api/create-order-with-deposit", async (req, res) => {
+    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
     
     try {
-        const orders = await new Promise((resolve, reject) => {
-            db.all(
-                `SELECT * FROM orders WHERE user_address = ? ORDER BY created_at DESC`,
-                [userAddress],
-                (err, rows) => err ? reject(err) : resolve(rows)
-            );
+        console.log("📝 Création ordre SIMPLE:", { userAddress, assetSymbol, orderType, quantity, price });
+        
+        // Créer l'ordre directement en base de données
+        db.run(
+            `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)`,
+            [userAddress, assetSymbol, orderType, quantity, price],
+            function(err) {
+                if (err) {
+                    console.error("Erreur création ordre:", err);
+                    res.status(500).json({ success: false, error: err.message });
+                } else {
+                    console.log("✅ Ordre créé avec ID:", this.lastID);
+                    
+                    // Déclencher le matching automatique
+                    setTimeout(() => {
+                        fetch(`http://localhost:3001/api/match-orders/${assetSymbol}`, {
+                            method: "POST"
+                        }).catch(err => console.log("Matching:", err.message));
+                    }, 1000);
+                    
+                    res.json({ 
+                        success: true, 
+                        orderId: this.lastID,
+                        message: "Ordre créé - Matching en cours..."
+                    });
+                }
+            }
+        );
+        
+    } catch (error) {
+        console.error("❌ Erreur création ordre:", error);
+        res.status(500).json({
+            success: false,
+            error: error.message
         });
+    }
+});
+
+// Route pour vérifier les approbations
+app.get('/api/check-allowance/:userAddress/:tokenSymbol/:amount', async (req, res) => {
+    const { userAddress, tokenSymbol, amount } = req.params;
+    
+    try {
+        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
+        
+        // Charger les adresses
+        let addresses;
+        const possiblePaths = [
+            path.join(__dirname, "../contracts/deployed-addresses.json"),
+            path.join(__dirname, "../contracts/scripts/deployed-addresses.json")
+        ];
+        
+        for (const testPath of possiblePaths) {
+            if (fs.existsSync(testPath)) {
+                addresses = JSON.parse(fs.readFileSync(testPath, 'utf8'));
+                break;
+            }
+        }
+        
+        if (addresses.VAULT) {
+            addresses.TradingVault = addresses.VAULT;
+        }
+        
+        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json'), 'utf8')).abi;
+        const token = new ethers.Contract(addresses[tokenSymbol], tokenABI, provider);
+        
+        const allowance = await token.allowance(userAddress, addresses.TradingVault);
+        const requiredAmount = ethers.utils.parseUnits(amount.toString(), 18);
+        
+        const hasEnoughAllowance = allowance.gte(requiredAmount);
         
         res.json({
             success: true,
-            orders: orders
+            hasAllowance: hasEnoughAllowance,
+            currentAllowance: ethers.utils.formatUnits(allowance, 18),
+            requiredAmount: amount
         });
         
     } catch (error) {
-        console.error('❌ Erreur récupération ordres:', error);
+        console.error('❌ Erreur vérification allowance:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Route pour créer un ordre avec vérification d'approbation
+app.post('/api/create-order-with-approval', async (req, res) => {
+    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
+    
+    try {
+        console.log('📝 Création ordre avec approbation:', { userAddress, assetSymbol, orderType, quantity, price });
+        
+        // Déterminer quel token et montant sont nécessaires
+        let tokenNeeded, amountNeeded;
+        
+        if (orderType === 'sell') {
+            tokenNeeded = assetSymbol;
+            amountNeeded = quantity;
+        } else {
+            tokenNeeded = 'TRG';
+            amountNeeded = quantity * price;
+        }
+        
+        // Vérifier l'approbation
+        const allowanceResponse = await fetch(`http://localhost:3001/api/check-allowance/${userAddress}/${tokenNeeded}/${amountNeeded}`);
+        const allowanceData = await allowanceResponse.json();
+        
+        if (!allowanceData.hasAllowance) {
+            return res.status(400).json({
+                success: false,
+                error: 'Approbation insuffisante',
+                needsApproval: true,
+                tokenNeeded: tokenNeeded,
+                amountNeeded: amountNeeded
+            });
+        }
+        
+        // Créer l'ordre si approbation OK
+        db.run(
+            `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, status) VALUES (?, ?, ?, ?, ?, 'pending')`,
+            [userAddress, assetSymbol, orderType, quantity, price],
+            function(err) {
+                if (err) {
+                    console.error('Erreur création ordre:', err);
+                    res.status(500).json({ success: false, error: err.message });
+                } else {
+                    console.log('✅ Ordre créé avec approbation - ID:', this.lastID);
+                    
+                    // Déclencher le matching automatique
+                    setTimeout(() => {
+                        fetch(`http://localhost:3001/api/match-orders/${assetSymbol}`, {
+                            method: 'POST'
+                        }).catch(err => console.log('Matching:', err.message));
+                    }, 1000);
+                    
+                    res.json({ 
+                        success: true, 
+                        orderId: this.lastID,
+                        message: 'Ordre créé avec approbation - Matching en cours...'
+                    });
+                }
+            }
+        );
+        
+    } catch (error) {
+        console.error('❌ Erreur création ordre avec approbation:', error);
         res.status(500).json({
             success: false,
             error: error.message

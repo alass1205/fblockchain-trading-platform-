@@ -1,6 +1,7 @@
 require("@nomiclabs/hardhat-ethers");
 
 module.exports = {
+  allowUnlimitedContractSize: true,
   solidity: {
     version: "0.8.19",
     settings: {

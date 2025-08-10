@@ -1,0 +1,89 @@
+app.post("/api/execute-trade", async (req, res) => {
+    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
+    
+    try {
+        console.log("🔗 Exécution trade blockchain RÉELLE:", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
+        
+        // Configuration ethers.js
+        const provider = new ethers.JsonRpcProvider("http://localhost:8545");
+        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        
+        // Charger les adresses des contrats
+        const addressesPath = path.join(__dirname, '../contracts/deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        
+        // Charger les contrats
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
+        
+        const vault = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
+        
+        console.log("📋 Exécution du trade sur la blockchain...");
+        
+        // 1. Transférer l'asset du vendeur vers l'acheteur (via vault)
+        const transferAssetTx = await vault.transferFromVault(
+            addresses[assetSymbol],
+            sellerAddress,
+            buyerAddress,
+            ethers.parseUnits(quantity.toString(), 18)
+        );
+        await transferAssetTx.wait();
+        console.log("✅ Asset transféré:", transferAssetTx.hash);
+        
+        // 2. Transférer TRG de l'acheteur vers le vendeur (via vault)
+        const payment = quantity * price;
+        const transferPaymentTx = await vault.transferFromVault(
+            addresses.TRG,
+            buyerAddress,
+            sellerAddress,
+            ethers.parseUnits(payment.toString(), 18)
+        );
+        await transferPaymentTx.wait();
+        console.log("✅ Paiement transféré:", transferPaymentTx.hash);
+        
+        // 3. Mettre à jour les ordres en base
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE orders SET status = 'filled' WHERE asset_symbol = ? AND order_type = 'sell' AND user_address = ? AND status = 'pending'`,
+                [assetSymbol, sellerAddress],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
+        
+        await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE orders SET status = 'filled' WHERE asset_symbol = ? AND order_type = 'buy' AND user_address = ? AND status = 'pending'`,
+                [assetSymbol, buyerAddress],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
+        
+        console.log("✅ Trade exécuté avec succès sur la blockchain");
+        
+        res.json({
+            success: true,
+            message: 'Trade exécuté sur la blockchain avec succès',
+            transactionDetails: {
+                asset: `${quantity} ${assetSymbol}`,
+                payment: `${payment} TRG`,
+                buyer: buyerAddress,
+                seller: sellerAddress,
+                assetTxHash: transferAssetTx.hash,
+                paymentTxHash: transferPaymentTx.hash
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur trade blockchain:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});

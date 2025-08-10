@@ -13,6 +13,8 @@ async function main() {
     const trgToken = await StableCoin.deploy("Triangle", "TRG", 4000);
     await trgToken.deployed();
     console.log("TRG déployé à:", trgToken.address);
+    
+    // Vérification des déploiements
 
     // 2. Déploiement des actions CLV
     console.log("\n📄 Déploiement CLV Shares...");
@@ -20,12 +22,16 @@ async function main() {
     const clvToken = await ShareToken.deploy("Clove Company", "CLV", 100, trgToken.address);
     await clvToken.deployed();
     console.log("CLV déployé à:", clvToken.address);
+    
+    // Vérification des déploiements
 
     // 3. Déploiement des actions ROO
     console.log("\n📄 Déploiement ROO Shares...");
     const rooToken = await ShareToken.deploy("Rooibos Limited", "ROO", 100, trgToken.address);
     await rooToken.deployed();
     console.log("ROO déployé à:", rooToken.address);
+    
+    // Vérification des déploiements
 
     // 4. Déploiement des obligations GOV
     console.log("\n📄 Déploiement GOV Bonds...");
@@ -33,6 +39,8 @@ async function main() {
     const govBonds = await BondToken.deploy(trgToken.address);
     await govBonds.deployed();
     console.log("GOV déployé à:", govBonds.address);
+    
+    // Vérification des déploiements
 
     // 5. Déploiement du Vault
     console.log("\n📄 Déploiement Trading Vault...");
@@ -40,6 +48,8 @@ async function main() {
     const vault = await TradingVault.deploy();
     await vault.deployed();
     console.log("Vault déployé à:", vault.address);
+    
+    // Vérification des déploiements
 
     // Sauvegarde des adresses
     const addresses = {

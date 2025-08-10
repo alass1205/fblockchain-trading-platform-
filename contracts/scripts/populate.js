@@ -1,103 +1,105 @@
-const { ethers } = require("hardhat");
+const hre = require("hardhat");
+const fs = require("fs");
 
 async function main() {
     console.log("🌱 Population de la plateforme avec les données initiales...");
     
     // Charger les adresses déployées
-    const fs = require('fs');
-    const addresses = JSON.parse(fs.readFileSync('deployed-addresses.json', 'utf8'));
+    const addresses = JSON.parse(fs.readFileSync("deployed-addresses.json", "utf8"));
     
-    const [deployer, aya, beatriz] = await ethers.getSigners();
+    const signers = await hre.ethers.getSigners();
+    const deployer = signers[0];
+    const aya = signers[1];  // Utiliser les signers Hardhat
+    const beatriz = signers[2];
+    
     console.log("Deployer:", deployer.address);
     console.log("Aya:", aya.address);
     console.log("Beatriz:", beatriz.address);
 
-    // Connexion aux contrats
-    const TRG = await ethers.getContractAt("StableCoin", addresses.TRG);
-    const CLV = await ethers.getContractAt("ShareToken", addresses.CLV);
-    const ROO = await ethers.getContractAt("ShareToken", addresses.ROO);
-    const GOV = await ethers.getContractAt("BondToken", addresses.GOV);
+    // Charger les contrats
+    const trg = await hre.ethers.getContractAt("StableCoin", addresses.TRG);
+    const clv = await hre.ethers.getContractAt("ShareToken", addresses.CLV);
+    const roo = await hre.ethers.getContractAt("ShareToken", addresses.ROO);
+    const gov = await hre.ethers.getContractAt("BondToken", addresses.GOV);
 
     console.log("\n📋 État initial des contrats:");
-    console.log("TRG Total Supply:", ethers.utils.formatEther(await TRG.totalSupply()));
-    console.log("CLV Total Supply:", ethers.utils.formatEther(await CLV.totalSupply()));
-    console.log("ROO Total Supply:", ethers.utils.formatEther(await ROO.totalSupply()));
+    console.log("TRG Total Supply:", hre.ethers.utils.formatUnits(await trg.totalSupply(), 18));
+    console.log("CLV Total Supply:", hre.ethers.utils.formatUnits(await clv.totalSupply(), 18));
+    console.log("ROO Total Supply:", hre.ethers.utils.formatUnits(await roo.totalSupply(), 18));
 
-    // 1. Distribution TRG à Aya et Beatriz
     console.log("\n💰 Distribution TRG...");
-    await TRG.transfer(aya.address, ethers.utils.parseEther("200"));
-    await TRG.transfer(beatriz.address, ethers.utils.parseEther("150"));
+    await trg.transfer(aya.address, hre.ethers.utils.parseUnits("200", 18));
+    await trg.transfer(beatriz.address, hre.ethers.utils.parseUnits("150", 18));
     console.log("✅ Aya reçoit 200 TRG");
     console.log("✅ Beatriz reçoit 150 TRG");
 
-    // 2. Distribution CLV à Aya
     console.log("\n📈 Distribution CLV...");
-    await CLV.transfer(aya.address, ethers.utils.parseEther("10"));
+    await clv.transfer(aya.address, hre.ethers.utils.parseUnits("10", 18));
     console.log("✅ Aya reçoit 10 CLV");
 
-    // 3. Distribution ROO à Beatriz
     console.log("\n📈 Distribution ROO...");
-    await ROO.transfer(beatriz.address, ethers.utils.parseEther("20"));
+    await roo.transfer(beatriz.address, hre.ethers.utils.parseUnits("20", 18));
     console.log("✅ Beatriz reçoit 20 ROO");
 
-    // 4. Création des obligations GOV
     console.log("\n🏛️ Création des obligations GOV...");
     
-    // Création de 2 obligations pour Aya
-    await GOV.issueBond(aya.address, ethers.utils.parseEther("200"), 1000); // 10% interest
-    await GOV.issueBond(aya.address, ethers.utils.parseEther("200"), 1000);
+    // Créer 2 obligations pour Aya
+    for (let i = 0; i < 2; i++) {
+        await gov.issueBond(aya.address, 200, 10);
+    }
     console.log("✅ Aya reçoit 2 obligations GOV (200 TRG chacune, 10% intérêt)");
 
-    // Création de 5 obligations pour Beatriz
-    for(let i = 0; i < 5; i++) {
-        await GOV.issueBond(beatriz.address, ethers.utils.parseEther("200"), 1000);
+    // Créer 5 obligations pour Beatriz  
+    for (let i = 0; i < 5; i++) {
+        await gov.issueBond(beatriz.address, 200, 10);
     }
     console.log("✅ Beatriz reçoit 5 obligations GOV (200 TRG chacune, 10% intérêt)");
 
-    // Création d'obligations supplémentaires pour le deployer (pour avoir 20 au total)
-    for(let i = 0; i < 13; i++) {
-        await GOV.issueBond(deployer.address, ethers.utils.parseEther("200"), 1000);
+    // Créer 13 obligations supplémentaires pour le deployer
+    for (let i = 0; i < 13; i++) {
+        await gov.issueBond(deployer.address, 200, 10);
     }
     console.log("✅ 13 obligations supplémentaires créées pour le deployer");
 
-    // 5. Vérification finale
     console.log("\n📊 Vérification des balances finales:");
-    
+
     console.log("\n--- AYA ---");
-    console.log("TRG:", ethers.utils.formatEther(await TRG.balanceOf(aya.address)));
-    console.log("CLV:", ethers.utils.formatEther(await CLV.balanceOf(aya.address)));
-    console.log("ROO:", ethers.utils.formatEther(await ROO.balanceOf(aya.address)));
-    const ayaBonds = await GOV.getBondsByOwner(aya.address);
+    console.log("TRG:", hre.ethers.utils.formatUnits(await trg.balanceOf(aya.address), 18));
+    console.log("CLV:", hre.ethers.utils.formatUnits(await clv.balanceOf(aya.address), 18));
+    console.log("ROO:", hre.ethers.utils.formatUnits(await roo.balanceOf(aya.address), 18));
+    const ayaBonds = await gov.getBondsByOwner(aya.address);
     console.log("GOV Bonds:", ayaBonds.length);
 
     console.log("\n--- BEATRIZ ---");
-    console.log("TRG:", ethers.utils.formatEther(await TRG.balanceOf(beatriz.address)));
-    console.log("CLV:", ethers.utils.formatEther(await CLV.balanceOf(beatriz.address)));
-    console.log("ROO:", ethers.utils.formatEther(await ROO.balanceOf(beatriz.address)));
-    const beatrizBonds = await GOV.getBondsByOwner(beatriz.address);
+    console.log("TRG:", hre.ethers.utils.formatUnits(await trg.balanceOf(beatriz.address), 18));
+    console.log("CLV:", hre.ethers.utils.formatUnits(await clv.balanceOf(beatriz.address), 18));
+    console.log("ROO:", hre.ethers.utils.formatUnits(await roo.balanceOf(beatriz.address), 18));
+    const beatrizBonds = await gov.getBondsByOwner(beatriz.address);
     console.log("GOV Bonds:", beatrizBonds.length);
 
     console.log("\n--- TOTAUX ---");
-    console.log("Total TRG Supply:", ethers.utils.formatEther(await TRG.totalSupply()));
-    console.log("Total CLV Supply:", ethers.utils.formatEther(await CLV.totalSupply()));
-    console.log("Total ROO Supply:", ethers.utils.formatEther(await ROO.totalSupply()));
-    console.log("Total GOV Bonds:", await GOV.totalBonds());
+    console.log("Total TRG Supply:", hre.ethers.utils.formatUnits(await trg.totalSupply(), 18));
+    console.log("Total CLV Supply:", hre.ethers.utils.formatUnits(await clv.totalSupply(), 18));
+    console.log("Total ROO Supply:", hre.ethers.utils.formatUnits(await roo.totalSupply(), 18));
+    const totalBonds = await gov.totalBonds();
+    console.log("Total GOV Bonds:", totalBonds);
 
-    // Sauvegarde des adresses des utilisateurs
-    const userData = {
-        ...addresses,
-        AYA: aya.address,
-        BEATRIZ: beatriz.address
+    // Sauvegarder les adresses utilisateur
+    const userAddresses = {
+        aya: aya.address,
+        beatriz: beatriz.address,
+        deployer: deployer.address
     };
 
-    fs.writeFileSync('user-addresses.json', JSON.stringify(userData, null, 2));
+    fs.writeFileSync("user-addresses.json", JSON.stringify(userAddresses, null, 2));
     console.log("\n✅ Données utilisateurs sauvegardées dans user-addresses.json");
-    console.log("\n🎉 Population terminée avec succès !");
+    console.log("\n🎯 Adresses finales pour MetaMask :");
+    console.log("👤 Aya:", aya.address);
+    console.log("👤 Beatriz:", beatriz.address);
+    console.log("✅ Population terminée avec succès !");
 }
 
-main()
-    .then(() => process.exit(0))
-    .catch((error) => {
-        console.error(error);
-        process.exit(1);
-    });
+main().catch((error) => {
+    console.error("❌ Erreur:", error);
+    process.exitCode = 1;
+});

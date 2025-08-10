@@ -1,0 +1,20 @@
+
+    /**
+     * @dev Transférer des tokens entre utilisateurs (réservé au owner/plateforme)
+     */
+    function transferFromVault(
+        address token, 
+        address from, 
+        address to, 
+        uint256 amount
+    ) external onlyOwner nonReentrant {
+        require(token != address(0), "Token invalide");
+        require(from != address(0) && to != address(0), "Adresses invalides");
+        require(amount > 0, "Montant doit etre positif");
+        require(balances[token][from] >= amount, "Solde insuffisant");
+        
+        balances[token][from] -= amount;
+        balances[token][to] += amount;
+        
+        emit Transfer(token, from, to, amount);
+    }

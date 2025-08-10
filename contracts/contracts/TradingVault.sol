@@ -2,68 +2,112 @@
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "./BondToken.sol";
 
-contract TradingVault is Ownable {
-    mapping(address => mapping(address => uint256)) public userTokenBalances;
-    mapping(address => mapping(uint256 => bool)) public userBondDeposits;
+contract TradingVault {
     
-    event TokenDeposited(address indexed user, address indexed token, uint256 amount);
-    event TokenWithdrawn(address indexed user, address indexed token, uint256 amount);
-    event BondDeposited(address indexed user, address indexed bondContract, uint256 serialNumber);
-    event BondWithdrawn(address indexed user, address indexed bondContract, uint256 serialNumber);
-
-    function depositToken(address tokenAddress, uint256 amount) external {
-        require(amount > 0, "Amount must be greater than 0");
-        IERC20 token = IERC20(tokenAddress);
-        require(token.transferFrom(msg.sender, address(this), amount), "Transfer failed");
-        
-        userTokenBalances[msg.sender][tokenAddress] += amount;
-        emit TokenDeposited(msg.sender, tokenAddress, amount);
+    address public owner;
+    
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
     }
-
-    function depositBond(address bondContract, uint256 serialNumber) external {
-        BondToken bondToken = BondToken(bondContract);
-        bondToken.transferBond(serialNumber, address(this));
-        userBondDeposits[msg.sender][serialNumber] = true;
-        
-        emit BondDeposited(msg.sender, bondContract, serialNumber);
+    
+    // Events pour la traçabilité
+    event Deposit(address indexed user, address indexed token, uint256 amount);
+    event Withdrawal(address indexed user, address indexed token, uint256 amount);
+    event Transfer(address indexed token, address indexed from, address indexed to, uint256 amount);
+    
+    // Mapping : token => user => balance
+    mapping(address => mapping(address => uint256)) public balances;
+    
+    constructor() {
+        owner = msg.sender;
     }
-
-    function operateWithdrawal(
-        address user,
-        address tokenAddress,
+    
+    /**
+     * @dev Déposer des tokens dans le vault
+     */
+    function deposit(address token, uint256 amount) external {
+        require(token != address(0), "Token invalide");
+        require(amount > 0, "Montant doit etre positif");
+        
+        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        balances[token][msg.sender] += amount;
+        
+        emit Deposit(msg.sender, token, amount);
+    }
+    
+    /**
+     * @dev Retirer des tokens du vault
+     */
+    function withdraw(address token, uint256 amount) external {
+        require(token != address(0), "Token invalide");
+        require(amount > 0, "Montant doit etre positif");
+        require(balances[token][msg.sender] >= amount, "Solde insuffisant");
+        
+        balances[token][msg.sender] -= amount;
+        IERC20(token).transfer(msg.sender, amount);
+        
+        emit Withdrawal(msg.sender, token, amount);
+    }
+    
+    /**
+     * @dev Transférer des tokens entre utilisateurs (réservé au owner/plateforme)
+     */
+    function transferFromVault(
+        address token, 
+        address from, 
+        address to, 
         uint256 amount
     ) external onlyOwner {
-        require(userTokenBalances[user][tokenAddress] >= amount, "Insufficient balance");
+        require(token != address(0), "Token invalide");
+        require(from != address(0) && to != address(0), "Adresses invalides");
+        require(amount > 0, "Montant doit etre positif");
+        require(balances[token][from] >= amount, "Solde insuffisant");
         
-        userTokenBalances[user][tokenAddress] -= amount;
-        IERC20 token = IERC20(tokenAddress);
-        require(token.transfer(user, amount), "Transfer failed");
+        balances[token][from] -= amount;
+        balances[token][to] += amount;
         
-        emit TokenWithdrawn(user, tokenAddress, amount);
+        emit Transfer(token, from, to, amount);
     }
-
-    function operateBondWithdrawal(
-        address user,
-        address bondContract,
-        uint256 serialNumber
+    
+    /**
+     * @dev Retirer des tokens pour un utilisateur (opération administrative)
+     */
+    function operateWithdrawal(
+        address user, 
+        address token, 
+        uint256 amount
     ) external onlyOwner {
-        require(userBondDeposits[user][serialNumber], "Bond not deposited by user");
+        require(token != address(0), "Token invalide");
+        require(user != address(0), "Utilisateur invalide");
+        require(amount > 0, "Montant doit etre positif");
+        require(balances[token][user] >= amount, "Solde insuffisant");
         
-        userBondDeposits[user][serialNumber] = false;
-        BondToken bondToken = BondToken(bondContract);
-        bondToken.transferBond(serialNumber, user);
+        balances[token][user] -= amount;
+        IERC20(token).transfer(user, amount);
         
-        emit BondWithdrawn(user, bondContract, serialNumber);
+        emit Withdrawal(user, token, amount);
     }
-
-    function getUserTokenBalance(address user, address tokenAddress) external view returns (uint256) {
-        return userTokenBalances[user][tokenAddress];
+    
+    /**
+     * @dev Obtenir le solde d'un utilisateur pour un token
+     */
+    function getBalance(address token, address user) external view returns (uint256) {
+        return balances[token][user];
     }
-
-    function hasBondDeposit(address user, uint256 serialNumber) external view returns (bool) {
-        return userBondDeposits[user][serialNumber];
+    
+    /**
+     * @dev Obtenir les soldes de plusieurs tokens pour un utilisateur
+     */
+    function getBalances(
+        address[] calldata tokens, 
+        address user
+    ) external view returns (uint256[] memory) {
+        uint256[] memory userBalances = new uint256[](tokens.length);
+        for (uint i = 0; i < tokens.length; i++) {
+            userBalances[i] = balances[tokens[i]][user];
+        }
+        return userBalances;
     }
 }
