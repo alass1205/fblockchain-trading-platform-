@@ -110,4 +110,47 @@ contract TradingVault {
         }
         return userBalances;
     }
+
+    /**
+     * @dev Exécuter un trade avec transferFrom direct
+     */
+    function executeTrade(
+        address assetToken,
+        address paymentToken,
+        address seller,
+        address buyer,
+        uint256 assetAmount,
+        uint256 paymentAmount
+    ) external onlyOwner {
+        require(assetToken != address(0) && paymentToken != address(0), "Token invalide");
+        require(seller != address(0) && buyer != address(0), "Adresses invalides");
+        require(assetAmount > 0 && paymentAmount > 0, "Montants doivent etre positifs");
+        require(seller != buyer, "Vendeur et acheteur doivent etre differents");
+        
+        // Vérifier que les allowances sont suffisantes
+        require(
+            IERC20(assetToken).allowance(seller, address(this)) >= assetAmount,
+            "Seller asset allowance insufficient"
+        );
+        require(
+            IERC20(paymentToken).allowance(buyer, address(this)) >= paymentAmount,
+            "Buyer payment allowance insufficient"
+        );
+        
+        // TransferFrom asset du vendeur vers acheteur
+        require(
+            IERC20(assetToken).transferFrom(seller, buyer, assetAmount),
+            "Asset transfer failed"
+        );
+        
+        // TransferFrom payment de l'acheteur vers vendeur
+        require(
+            IERC20(paymentToken).transferFrom(buyer, seller, paymentAmount),
+            "Payment transfer failed"
+        );
+        
+        // Émettre événements pour la traçabilité
+        emit Transfer(assetToken, seller, buyer, assetAmount);
+        emit Transfer(paymentToken, buyer, seller, paymentAmount);
+    }
 }

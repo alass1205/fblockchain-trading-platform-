@@ -14,4 +14,4 @@ npx hardhat run scripts/populate.js --network localhost
 cat user-addresses.json
 
 
-npx hardhat run scripts/reset-balances.js --network localhost
+npx hardhat run scripts/reset-balances.js --network 8

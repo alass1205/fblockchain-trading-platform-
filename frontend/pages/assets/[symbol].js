@@ -21,11 +21,31 @@ export default function AssetPage() {
     const [needsApproval, setNeedsApproval] = useState(false);
     const [approving, setApproving] = useState(false);
 
+    // Adresses des contrats (depuis deployed-addresses.json)
+    const CONTRACT_ADDRESSES = {
+        TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+        CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512", 
+        ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+        VAULT: "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+    };
+
     useEffect(() => {
         if (symbol) {
             checkWallet();
         }
     }, [symbol]);
+
+    // 🔄 RAFRAÎCHISSEMENT AUTOMATIQUE TOUTES LES 2 SECONDES
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (account && symbol) {
+                loadOrderBook();
+                loadBalances(account);
+            }
+        }, 2000);
+
+        return () => clearInterval(interval);
+    }, [account, symbol]);
 
     const checkWallet = async () => {
         if (typeof window.ethereum !== 'undefined') {
@@ -56,7 +76,10 @@ export default function AssetPage() {
                 const data = await response.json();
                 if (data.success) {
                     setAsset(data.asset);
-                    setPrice(data.asset.defaultPrice.toString());
+                    // 🔧 NE PAS ÉCRASER LE PRIX UTILISATEUR
+                    if (!price) {
+                        setPrice(data.asset.currentPrice.toString());
+                    }
                 }
             }
         } catch (error) {
@@ -78,15 +101,17 @@ export default function AssetPage() {
         }
     };
 
+    // 🔧 CORRECTION DE LA LECTURE DES ORDRES
     const loadOrderBook = async () => {
         try {
             const response = await fetch(`http://localhost:3001/api/orderbook/${symbol}`);
             if (response.ok) {
                 const data = await response.json();
                 if (data.success) {
+                    console.log('📊 Orderbook data:', data.orderbook); // Debug
                     setOrders({
-                        buyOrders: data.orderbook.buy || [],
-                        sellOrders: data.orderbook.sell || []
+                        buyOrders: data.orderbook.buyOrders || [],  // ✅ CORRIGÉ
+                        sellOrders: data.orderbook.sellOrders || [] // ✅ CORRIGÉ
                     });
                 }
             }
@@ -113,6 +138,7 @@ export default function AssetPage() {
         }
     };
 
+    // 🔧 FONCTION D'APPROBATION CORRIGÉE
     const requestApproval = async () => {
         if (!window.ethereum) return;
         
@@ -122,17 +148,35 @@ export default function AssetPage() {
             const tokenNeeded = orderType === 'sell' ? symbol : 'TRG';
             const amountNeeded = orderType === 'sell' ? quantity : (parseFloat(quantity) * parseFloat(price));
             
-            // Adresse du vault (à récupérer depuis le backend)
-            const vaultAddress = "0x5081a39b8A5f0E35a8D959395a630b68B74Dd30f"; // Temporaire
+            console.log('🔓 Demande d\'approbation:', { tokenNeeded, amountNeeded });
             
-            // Construire la transaction d'approbation
-            const amountWei = window.ethereum.utils?.parseUnits(amountNeeded.toString(), 18) || 
-                             `0x${(parseFloat(amountNeeded) * Math.pow(10, 18)).toString(16)}`;
+            // Convertir le montant en Wei (format BigNumber)
+            const amountWei = (parseFloat(amountNeeded) * Math.pow(10, 18)).toString();
+            const amountHex = '0x' + BigInt(amountWei).toString(16);
             
+            // Adresse du token à approuver
+            const tokenAddress = CONTRACT_ADDRESSES[tokenNeeded];
+            const spenderAddress = CONTRACT_ADDRESSES.VAULT;
+            
+            // Construire les données de la transaction ERC20.approve(spender, amount)
+            const functionSignature = '0x095ea7b3'; // approve(address,uint256)
+            const spenderPadded = spenderAddress.slice(2).padStart(64, '0');
+            const amountPadded = amountHex.slice(2).padStart(64, '0');
+            
+            const txData = functionSignature + spenderPadded + amountPadded;
+            
+            console.log('📋 Transaction d\'approbation:', {
+                to: tokenAddress,
+                data: txData,
+                amountWei: amountWei,
+                amountHex: amountHex
+            });
+
             const txParams = {
-                to: tokenNeeded === 'TRG' ? '0x1429859428C0aBc9C2C47C8Ee9FBaf82cFA0F20f' : '0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07',
+                to: tokenAddress,
                 from: account,
-                data: `0x095ea7b3${vaultAddress.slice(2).padStart(64, '0')}${amountWei.slice(2).padStart(64, '0')}`
+                data: txData,
+                gas: '0x15f90', // 90000 gas
             };
 
             const txHash = await window.ethereum.request({
@@ -143,19 +187,35 @@ export default function AssetPage() {
             console.log('✅ Approbation envoyée:', txHash);
             alert('Approbation envoyée ! Attendez la confirmation...');
             
-            // Attendre quelques secondes puis vérifier
-            setTimeout(async () => {
+            // Attendre la confirmation (polling)
+            let attempts = 0;
+            const maxAttempts = 10;
+            
+            const checkConfirmation = async () => {
+                attempts++;
+                console.log(`🔍 Vérification approbation... (${attempts}/${maxAttempts})`);
+                
                 const hasApproval = await checkApproval();
                 if (hasApproval) {
                     setNeedsApproval(false);
-                    alert('Approbation confirmée ! Vous pouvez maintenant créer l\'ordre.');
+                    setApproving(false);
+                    alert('✅ Approbation confirmée ! Vous pouvez maintenant créer l\'ordre.');
+                    return;
                 }
-                setApproving(false);
-            }, 3000);
+                
+                if (attempts < maxAttempts) {
+                    setTimeout(checkConfirmation, 2000);
+                } else {
+                    setApproving(false);
+                    alert('⏱️ Délai d\'attente dépassé. Vérifiez votre transaction et réessayez.');
+                }
+            };
+            
+            setTimeout(checkConfirmation, 3000);
 
         } catch (error) {
             console.error('Erreur approbation:', error);
-            alert('Erreur lors de l\'approbation');
+            alert('Erreur lors de l\'approbation: ' + error.message);
             setApproving(false);
         }
     };
@@ -182,6 +242,7 @@ export default function AssetPage() {
             if (!hasApproval) {
                 setNeedsApproval(true);
                 setCreating(false);
+                alert('⚠️ Approbation requise avant de créer l\'ordre');
                 return;
             }
 
@@ -202,16 +263,18 @@ export default function AssetPage() {
             const data = await response.json();
 
             if (data.success) {
-                alert(`Ordre ${orderType} créé avec succès!`);
+                alert(`✅ Ordre ${orderType} créé avec succès!`);
                 setQuantity('');
+                setNeedsApproval(false);
                 
                 // Recharger les données
                 await loadBalances(account);
                 await loadOrderBook();
             } else if (data.needsApproval) {
                 setNeedsApproval(true);
+                alert('⚠️ Approbation requise');
             } else {
-                alert(`Erreur: ${data.error}`);
+                alert(`❌ Erreur: ${data.error}`);
             }
         } catch (error) {
             console.error('Erreur création ordre:', error);
@@ -279,18 +342,18 @@ export default function AssetPage() {
 
             {/* Titre */}
             <div style={{ textAlign: 'center', marginBottom: '30px' }}>
-                <h1>📈 Trading {symbol} avec Approbations</h1>
+                <h1>📈 Trading {symbol} - MATCHING CORRIGÉ ✅</h1>
                 {asset && (
                     <p style={{ fontSize: '18px', color: '#6b7280' }}>
-                        {asset.name} • Prix par défaut: {asset.defaultPrice} TRG
+                        {asset.name} • Prix suggéré: {asset.currentPrice} TRG
                     </p>
                 )}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px' }}>
-                {/* Graphique des prix (gauche) */}
+                {/* Carnet d'ordres (gauche) */}
                 <div>
-                    <h2>📊 Carnet d'ordres</h2>
+                    <h2>📊 Carnet d'ordres EN TEMPS RÉEL</h2>
                     <div style={{ 
                         display: 'grid', 
                         gridTemplateColumns: '1fr 1fr', 
@@ -298,17 +361,22 @@ export default function AssetPage() {
                     }}>
                         {/* Ordres d'achat */}
                         <div>
-                            <strong>💰 Ordres d'achat</strong>
+                            <strong>💰 Ordres d'achat ({orders.buyOrders.length})</strong>
                             {orders.buyOrders && orders.buyOrders.length > 0 ? (
                                 orders.buyOrders.map((order, index) => (
                                     <div key={index} style={{ 
-                                        padding: '5px', 
+                                        padding: '8px', 
                                         backgroundColor: '#d4edda',
-                                        borderRadius: '3px',
+                                        borderRadius: '5px',
                                         margin: '5px 0',
-                                        fontSize: '14px'
+                                        fontSize: '14px',
+                                        border: order.user_address.toLowerCase() === account.toLowerCase() ? '2px solid #28a745' : 'none'
                                     }}>
-                                        {order.quantity} @ {order.price} TRG
+                                        <strong>{order.quantity} @ {order.price} TRG</strong>
+                                        <br />
+                                        <small>{order.user_address.slice(0,8)}... 
+                                        {order.user_address.toLowerCase() === account.toLowerCase() && ' (Vous)'}
+                                        </small>
                                     </div>
                                 ))
                             ) : (
@@ -327,17 +395,22 @@ export default function AssetPage() {
 
                         {/* Ordres de vente */}
                         <div>
-                            <strong>💸 Ordres de vente</strong>
+                            <strong>💸 Ordres de vente ({orders.sellOrders.length})</strong>
                             {orders.sellOrders && orders.sellOrders.length > 0 ? (
                                 orders.sellOrders.map((order, index) => (
                                     <div key={index} style={{ 
-                                        padding: '5px', 
+                                        padding: '8px', 
                                         backgroundColor: '#f8d7da',
-                                        borderRadius: '3px',
+                                        borderRadius: '5px',
                                         margin: '5px 0',
-                                        fontSize: '14px'
+                                        fontSize: '14px',
+                                        border: order.user_address.toLowerCase() === account.toLowerCase() ? '2px solid #dc3545' : 'none'
                                     }}>
-                                        {order.quantity} @ {order.price} TRG
+                                        <strong>{order.quantity} @ {order.price} TRG</strong>
+                                        <br />
+                                        <small>{order.user_address.slice(0,8)}...
+                                        {order.user_address.toLowerCase() === account.toLowerCase() && ' (Vous)'}
+                                        </small>
                                     </div>
                                 ))
                             ) : (
@@ -358,7 +431,7 @@ export default function AssetPage() {
 
                 {/* Panneau de trading (droite) */}
                 <div>
-                    <h2>💼 Trading avec Approbations</h2>
+                    <h2>💼 Trading avec Approbations CORRIGÉ</h2>
                     
                     {/* Mes balances */}
                     <div style={{ 
@@ -378,7 +451,7 @@ export default function AssetPage() {
                         padding: '20px', 
                         borderRadius: '10px'
                     }}>
-                        <h3>📝 Créer un ordre (avec approbation)</h3>
+                        <h3>📝 Créer un ordre (prix libre)</h3>
                         
                         {needsApproval && (
                             <div style={{
@@ -389,7 +462,8 @@ export default function AssetPage() {
                                 marginBottom: '15px'
                             }}>
                                 <strong>⚠️ Approbation requise</strong>
-                                <p>Vous devez d'abord approuver le transfer de vos tokens.</p>
+                                <p>Token à approuver: <strong>{orderType === 'sell' ? symbol : 'TRG'}</strong></p>
+                                <p>Montant: <strong>{orderType === 'sell' ? quantity : (parseFloat(quantity || 0) * parseFloat(price || 0)).toFixed(2)}</strong></p>
                                 <button 
                                     onClick={requestApproval}
                                     disabled={approving}
@@ -402,7 +476,7 @@ export default function AssetPage() {
                                         cursor: approving ? 'not-allowed' : 'pointer'
                                     }}
                                 >
-                                    {approving ? '⏳ Approbation...' : '🔓 Approuver'}
+                                    {approving ? '⏳ Approbation en cours...' : '🔓 Approuver maintenant'}
                                 </button>
                             </div>
                         )}
@@ -415,7 +489,10 @@ export default function AssetPage() {
                                 </label>
                                 <select 
                                     value={orderType} 
-                                    onChange={(e) => setOrderType(e.target.value)}
+                                    onChange={(e) => {
+                                        setOrderType(e.target.value);
+                                        setNeedsApproval(false);
+                                    }}
                                     style={{ 
                                         width: '100%', 
                                         padding: '10px', 
@@ -436,7 +513,10 @@ export default function AssetPage() {
                                 <input 
                                     type="number" 
                                     value={quantity}
-                                    onChange={(e) => setQuantity(e.target.value)}
+                                    onChange={(e) => {
+                                        setQuantity(e.target.value);
+                                        setNeedsApproval(false);
+                                    }}
                                     min="0.1"
                                     step="0.1"
                                     placeholder="Ex: 5"
@@ -449,18 +529,21 @@ export default function AssetPage() {
                                 />
                             </div>
 
-                            {/* Prix */}
+                            {/* Prix LIBRE */}
                             <div style={{ marginBottom: '20px' }}>
                                 <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
-                                    Prix (TRG):
+                                    Prix (TRG) - 🆓 Prix libre:
                                 </label>
                                 <input 
                                     type="number" 
                                     value={price}
-                                    onChange={(e) => setPrice(e.target.value)}
+                                    onChange={(e) => {
+                                        setPrice(e.target.value);
+                                        setNeedsApproval(false);
+                                    }}
                                     min="0.1"
                                     step="0.1"
-                                    placeholder="Ex: 10"
+                                    placeholder="Votre prix"
                                     style={{ 
                                         width: '100%', 
                                         padding: '10px', 
@@ -468,7 +551,37 @@ export default function AssetPage() {
                                         border: '1px solid #ddd'
                                     }}
                                 />
+                                <small style={{ color: '#6c757d' }}>
+                                    Prix suggéré: {asset?.currentPrice || 10} TRG
+                                </small>
                             </div>
+
+                            {/* Bouton de vérification d'approbation */}
+                            {quantity && price && !needsApproval && (
+                                <button 
+                                    type="button"
+                                    onClick={async () => {
+                                        const hasApproval = await checkApproval();
+                                        if (!hasApproval) {
+                                            setNeedsApproval(true);
+                                        } else {
+                                            alert('✅ Approbation déjà accordée !');
+                                        }
+                                    }}
+                                    style={{
+                                        width: '100%',
+                                        padding: '10px',
+                                        backgroundColor: '#17a2b8',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '5px',
+                                        cursor: 'pointer',
+                                        marginBottom: '10px'
+                                    }}
+                                >
+                                    🔍 Vérifier Approbation
+                                </button>
+                            )}
 
                             {/* Bouton de soumission */}
                             <button 
@@ -493,11 +606,11 @@ export default function AssetPage() {
                         </form>
 
                         {/* Résumé de l'ordre */}
-                        {quantity && price && !needsApproval && (
+                        {quantity && price && (
                             <div style={{ 
                                 marginTop: '15px', 
                                 padding: '10px', 
-                                backgroundColor: '#e7f3ff',
+                                backgroundColor: needsApproval ? '#fff3cd' : '#e7f3ff',
                                 borderRadius: '5px'
                             }}>
                                 <strong>📋 Résumé:</strong>
@@ -508,8 +621,11 @@ export default function AssetPage() {
                                 <strong>Total: {(parseFloat(quantity || 0) * parseFloat(price || 0)).toFixed(2)} TRG</strong>
                                 <br />
                                 <small style={{ color: '#6c757d' }}>
-                                    Token requis: {orderType === 'sell' ? symbol : 'TRG'} 
-                                    (Quantité: {orderType === 'sell' ? quantity : (parseFloat(quantity || 0) * parseFloat(price || 0)).toFixed(2)})
+                                    ⚙️ Token à approuver: <strong>{orderType === 'sell' ? symbol : 'TRG'}</strong>
+                                    <br />
+                                    📊 Quantité requise: <strong>{orderType === 'sell' ? quantity : (parseFloat(quantity || 0) * parseFloat(price || 0)).toFixed(2)}</strong>
+                                    <br />
+                                    🏦 Vault: {CONTRACT_ADDRESSES.VAULT}
                                 </small>
                             </div>
                         )}

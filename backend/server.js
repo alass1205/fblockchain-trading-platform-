@@ -1,28 +1,13 @@
 const express = require('express');
 const cors = require('cors');
-const multer = require('multer');
 const sqlite3 = require('sqlite3').verbose();
-const ethers = require('ethers');
-const fs = require('fs');
+const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
+const { ethers } = require('ethers');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-
-// Configuration multer pour upload de fichiers
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, 'uploads/');
-    },
-    filename: function (req, file, cb) {
-        cb(null, Date.now() + '-' + file.originalname);
-    }
-});
-
-const upload = multer({ 
-    storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB max
-});
+const PORT = 3001;
 
 // Middleware
 app.use(cors());
@@ -34,47 +19,52 @@ if (!fs.existsSync('uploads')) {
     fs.mkdirSync('uploads');
 }
 
+// Configuration multer pour upload fichiers
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'uploads/');
+    },
+    filename: (req, file, cb) => {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
+const upload = multer({ storage: storage });
+
+// Base de données SQLite
+const db = new sqlite3.Database('./trading.db');
+
 // Initialisation de la base de données
-const db = new sqlite3.Database('trading.db');
-
-// Création des tables
 db.serialize(() => {
-    // Table des actifs
-    db.run(`CREATE TABLE IF NOT EXISTS assets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT UNIQUE,
-        name TEXT,
-        type TEXT,
-        contract_address TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Table des utilisateurs
     db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        wallet_address TEXT UNIQUE,
-        legal_name TEXT,
+        wallet_address TEXT PRIMARY KEY,
+        legal_name TEXT NOT NULL,
         passport_picture TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Table des ordres
     db.run(`CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_address TEXT,
-        asset_symbol TEXT,
-        order_type TEXT,
-        quantity REAL,
-        price REAL,
+        user_address TEXT NOT NULL,
+        asset_symbol TEXT NOT NULL,
+        order_type TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        price REAL NOT NULL,
         status TEXT DEFAULT 'pending',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Table de l'historique des prix
+    db.run(`CREATE TABLE IF NOT EXISTS assets (
+        symbol TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        contract_address TEXT,
+        current_price REAL DEFAULT 10.0
+    )`);
+
     db.run(`CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        asset_symbol TEXT,
-        price REAL,
+        asset_symbol TEXT NOT NULL,
+        price REAL NOT NULL,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
@@ -85,11 +75,7 @@ db.serialize(() => {
 
 // Test de l'API
 app.get('/api/test', (req, res) => {
-    res.json({ 
-        message: 'API Backend fonctionne !',
-        timestamp: new Date().toISOString(),
-        port: PORT
-    });
+    res.json({ success: true, message: 'API backend fonctionne!' });
 });
 
 // Inscription utilisateur
@@ -97,684 +83,102 @@ app.post('/api/register', upload.single('passport'), (req, res) => {
     const { walletAddress, legalName } = req.body;
     const passportPicture = req.file ? req.file.filename : null;
 
+    console.log('📝 Inscription utilisateur:', { walletAddress, legalName, passportPicture });
+
     db.run(
-        `INSERT OR REPLACE INTO users (wallet_address, legal_name, passport_picture) VALUES (?, ?, ?)`,
+        'INSERT OR REPLACE INTO users (wallet_address, legal_name, passport_picture) VALUES (?, ?, ?)',
         [walletAddress, legalName, passportPicture],
         function(err) {
             if (err) {
-                console.error('Erreur inscription:', err);
+                console.error('❌ Erreur inscription:', err);
                 res.status(500).json({ success: false, error: err.message });
             } else {
-                res.json({ 
-                    success: true, 
-                    message: 'Utilisateur enregistré',
-                    userId: this.lastID 
-                });
+                console.log('✅ Utilisateur inscrit:', walletAddress);
+                res.json({ success: true, message: 'Utilisateur enregistré avec succès' });
             }
         }
     );
 });
 
-// Obtenir les informations utilisateur
+// Vérifier si un utilisateur est inscrit
 app.get('/api/user/:address', (req, res) => {
-    const address = req.params.address;
+    const { address } = req.params;
     
     db.get(
-        `SELECT * FROM users WHERE wallet_address = ?`,
+        'SELECT * FROM users WHERE wallet_address = ?',
         [address],
         (err, row) => {
             if (err) {
                 res.status(500).json({ success: false, error: err.message });
+            } else if (row) {
+                res.json({ success: true, registered: true, user: row });
             } else {
-                res.json({ success: true, user: row });
+                res.json({ success: true, registered: false });
             }
         }
     );
 });
 
-// Obtenir les balances blockchain
+// Récupération des balances blockchain
 app.get('/api/balances/:address', async (req, res) => {
-    const userAddress = req.params.address;
+    const { address } = req.params;
     
     try {
-        console.log('📊 Récupération balances pour:', userAddress);
+        console.log('📊 Récupération balances pour:', address);
         
-        // Configuration ethers.js
-        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
+        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
         
-        // Charger les adresses des contrats
-        const addressesPath = path.join(__dirname, '../contracts/deployed-addresses.json');
+        // Charger les adresses depuis deployed-addresses.json
+        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
         const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
-        // Fallback global VAULT -> TradingVault
-        if (!addresses.VAULT && addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
+        
+        console.log('📋 DEBUG - Adresses chargées:', addresses);
+        
+        const erc20ABI = [
+            "function balanceOf(address owner) view returns (uint256)"
+        ];
+        
+        const bondABI = [
+            "function getBondsByOwner(address owner) view returns (uint256[])"
+        ];
+        
+        const balances = {};
+        
+        // TRG Balance
+        const trgContract = new ethers.Contract(addresses.TRG, erc20ABI, provider);
+        const trgBalance = await trgContract.balanceOf(address);
+        balances.TRG = ethers.utils.formatEther(trgBalance);
+        
+        // CLV Balance
+        const clvContract = new ethers.Contract(addresses.CLV, erc20ABI, provider);
+        const clvBalance = await clvContract.balanceOf(address);
+        balances.CLV = ethers.utils.formatEther(clvBalance);
+        
+        // ROO Balance
+        const rooContract = new ethers.Contract(addresses.ROO, erc20ABI, provider);
+        const rooBalance = await rooContract.balanceOf(address);
+        balances.ROO = ethers.utils.formatEther(rooBalance);
+        
+        // GOV Bonds
+        try {
+            const govContract = new ethers.Contract(addresses.GOV, bondABI, provider);
+            const bonds = await govContract.getBondsByOwner(address);
+            balances.GOV = bonds.length.toString();
+        } catch (error) {
+            console.log('⚠️ Erreur GOV bonds:', error.message);
+            balances.GOV = '0';
         }
-        console.log("🔍 DEBUG - Fichier chargé:", addressesPath);
-        console.log("📋 DEBUG - Contenu addresses:", addresses);
-        console.log("🔍 DEBUG - TRG:", addresses.TRG);
-        console.log("🔍 DEBUG - CLV:", addresses.CLV);
-        console.log("🔍 DEBUG - TradingVault:", addresses.VAULT);
-        if (!addresses.VAULT && addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-            console.log("🔄 Fallback: VAULT -> TradingVault:", addresses.VAULT);
-        }
-        
-        // Charger les ABIs
-        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json'), 'utf8')).abi;
-        const bondABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/BondToken.sol/BondToken.json'), 'utf8')).abi;
-        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
-        
-        // Créer les instances de contrats
-        console.log("🔧 DEBUG - Création contrat TRG avec adresse:", addresses.TRG);
-        console.log("🔧 DEBUG - Création contrat CLV avec adresse:", addresses.CLV);
-        console.log("🔧 DEBUG - Création contrat vault avec adresse:", addresses.VAULT);
-        const trgToken = new ethers.Contract(addresses.TRG, tokenABI, provider);
-        const clvToken = new ethers.Contract(addresses.CLV, tokenABI, provider);
-        const rooToken = new ethers.Contract(addresses.ROO, tokenABI, provider);
-        const govToken = new ethers.Contract(addresses.GOV, bondABI, provider);
-        const vault = new ethers.Contract(addresses.VAULT, vaultABI, provider);
-        
-        // Récupérer les balances wallet
-        const trgBalance = await trgToken.balanceOf(userAddress);
-        const clvBalance = await clvToken.balanceOf(userAddress);
-        const rooBalance = await rooToken.balanceOf(userAddress);
-        const govBonds = await govToken.getBondsByOwner(userAddress);
-        
-        // Récupérer les balances vault
-        const trgVaultBalance = await vault.getBalance(addresses.TRG, userAddress);
-        const clvVaultBalance = await vault.getBalance(addresses.CLV, userAddress);
-        const rooVaultBalance = await vault.getBalance(addresses.ROO, userAddress);
-        
-        const balances = {
-            TRG: ethers.utils.formatUnits(trgBalance, 18),
-            CLV: ethers.utils.formatUnits(clvBalance, 18),
-            ROO: ethers.utils.formatUnits(rooBalance, 18),
-            GOV: govBonds.length.toString()
-        };
-        
-        const vaultBalances = {
-            TRG: ethers.utils.formatUnits(trgVaultBalance, 18),
-            CLV: ethers.utils.formatUnits(clvVaultBalance, 18),
-            ROO: ethers.utils.formatUnits(rooVaultBalance, 18)
-        };
-        
+
         console.log('✅ Balances récupérées:', balances);
         
         res.json({
             success: true,
-            balances: balances,
-            vaultBalances: vaultBalances
+            address: address,
+            balances: balances
         });
-        
+
     } catch (error) {
-        console.error('❌ Erreur récupération balances:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Créer un ordre
-app.post('/api/orders', (req, res) => {
-    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
-    
-    db.run(
-        `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)`,
-        [userAddress, assetSymbol, orderType, quantity, price],
-        function(err) {
-            if (err) {
-                console.error('Erreur création ordre:', err);
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                console.log('✅ Ordre créé:', { id: this.lastID, userAddress, assetSymbol, orderType, quantity, price });
-                res.json({ 
-                    success: true, 
-                    orderId: this.lastID,
-                    message: 'Ordre créé avec succès'
-                });
-            }
-        }
-    );
-});
-
-// Obtenir les ordres d'un utilisateur
-app.get('/api/orders/:address', (req, res) => {
-    const address = req.params.address;
-    
-    db.all(
-        `SELECT * FROM orders WHERE user_address = ? ORDER BY created_at DESC`,
-        [address],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                res.json({ success: true, orders: rows });
-            }
-        }
-    );
-});
-
-// Obtenir tous les ordres pour un actif
-app.get('/api/orders/asset/:symbol', (req, res) => {
-    const symbol = req.params.symbol;
-    
-    db.all(
-        `SELECT * FROM orders WHERE asset_symbol = ? AND status = 'pending' ORDER BY price ASC`,
-        [symbol],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                res.json({ success: true, orders: rows });
-            }
-        }
-    );
-});
-
-// Annuler un ordre
-app.post('/api/orders/:id/cancel', (req, res) => {
-    const orderId = req.params.id;
-    
-    db.run(
-        `UPDATE orders SET status = 'cancelled' WHERE id = ?`,
-        [orderId],
-        function(err) {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                res.json({ success: true, message: 'Ordre annulé' });
-            }
-        }
-    );
-});
-
-// Route pour exécuter un trade RÉEL sur blockchain
-app.post("/api/execute-trade", async (req, res) => {
-    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
-    
-    try {
-        console.log("🔗 Exécution trade blockchain RÉELLE:", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
-        
-        // Configuration ethers.js
-        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
-        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
-        
-        // Charger les adresses des contrats
-        const addressesPath = path.join(__dirname, '../contracts/deployed-addresses.json');
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
-        // Fallback global VAULT -> TradingVault
-        if (!addresses.VAULT && addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-        }
-        console.log("🔍 DEBUG - Fichier chargé:", addressesPath);
-        console.log("📋 DEBUG - Contenu addresses:", addresses);
-        console.log("🔍 DEBUG - TRG:", addresses.TRG);
-        console.log("🔍 DEBUG - CLV:", addresses.CLV);
-        console.log("🔍 DEBUG - TradingVault:", addresses.VAULT);
-        if (!addresses.VAULT && addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-            console.log("🔄 Fallback: VAULT -> TradingVault:", addresses.VAULT);
-        }
-        
-        // Charger les contrats
-        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
-        
-        const vault = new ethers.Contract(addresses.VAULT, vaultABI, wallet);
-        
-        console.log("📋 Exécution du trade sur la blockchain...");
-        
-        // Charger l'ABI des tokens
-        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json"), "utf8")).abi;
-        
-        // 1. Transférer l'asset du vendeur vers l'acheteur (wallet direct)
-        const assetToken = new ethers.Contract(addresses[assetSymbol], tokenABI, wallet);
-        const transferAssetTx = await assetToken.transferFrom(
-            sellerAddress,
-            buyerAddress,
-            ethers.utils.parseUnits(quantity.toString(), 18)
-        );
-        await transferAssetTx.wait();
-        console.log("✅ Asset transféré (wallet-to-wallet):", transferAssetTx.hash);
-        
-        // 2. Transférer TRG de l'acheteur vers le vendeur (wallet direct)
-        const payment = quantity * price;
-        const trgToken = new ethers.Contract(addresses.TRG, tokenABI, wallet);
-        const transferPaymentTx = await trgToken.transferFrom(
-            buyerAddress,
-            sellerAddress,
-            ethers.utils.parseUnits(payment.toString(), 18)
-        );
-        await transferPaymentTx.wait();
-        console.log("✅ Paiement transféré (wallet-to-wallet):", transferPaymentTx.hash);
-        
-        // 3. Mettre à jour les ordres en base
-        await new Promise((resolve, reject) => {
-            db.run(
-                `UPDATE orders SET status = 'filled' WHERE asset_symbol = ? AND order_type = 'sell' AND user_address = ? AND status = 'pending'`,
-                [assetSymbol, sellerAddress],
-                function(err) {
-                    if (err) reject(err);
-                    else resolve();
-                }
-            );
-        });
-        
-        await new Promise((resolve, reject) => {
-            db.run(
-                `UPDATE orders SET status = 'filled' WHERE asset_symbol = ? AND order_type = 'buy' AND user_address = ? AND status = 'pending'`,
-                [assetSymbol, buyerAddress],
-                function(err) {
-                    if (err) reject(err);
-                    else resolve();
-                }
-            );
-        });
-        
-        console.log("✅ Trade exécuté avec succès sur la blockchain");
-        
-        res.json({
-            success: true,
-            message: 'Trade exécuté sur la blockchain avec succès',
-            transactionDetails: {
-                asset: `${quantity} ${assetSymbol}`,
-                payment: `${payment} TRG`,
-                buyer: buyerAddress,
-                seller: sellerAddress,
-                assetTxHash: transferAssetTx.hash,
-                paymentTxHash: transferPaymentTx.hash
-            }
-        });
-        
-    } catch (error) {
-        console.error('❌ Erreur trade blockchain:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Route pour matcher automatiquement les ordres
-app.post('/api/match-orders/:symbol', async (req, res) => {
-    const symbol = req.params.symbol;
-    
-    try {
-        console.log('🎯 Matching orders pour', symbol);
-        
-        // Récupérer les ordres pending
-        const buyOrders = await new Promise((resolve, reject) => {
-            db.all(
-                `SELECT * FROM orders WHERE asset_symbol = ? AND order_type = 'buy' AND status = 'pending' ORDER BY price DESC`,
-                [symbol],
-                (err, rows) => err ? reject(err) : resolve(rows)
-            );
-        });
-        
-        const sellOrders = await new Promise((resolve, reject) => {
-            db.all(
-                `SELECT * FROM orders WHERE asset_symbol = ? AND order_type = 'sell' AND status = 'pending' ORDER BY price ASC`,
-                [symbol],
-                (err, rows) => err ? reject(err) : resolve(rows)
-            );
-        });
-        
-        const matches = [];
-        
-        // Algorithme de matching simple
-        for (const buyOrder of buyOrders) {
-            for (const sellOrder of sellOrders) {
-                if (buyOrder.price >= sellOrder.price && buyOrder.quantity === sellOrder.quantity) {
-                    // Match trouvé !
-                    console.log('💥 Match trouvé!', buyOrder.id, 'vs', sellOrder.id);
-                    
-                    // Exécuter le trade
-                    const tradeResult = await fetch('http://localhost:3001/api/execute-trade', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            buyerAddress: buyOrder.user_address,
-                            sellerAddress: sellOrder.user_address,
-                            assetSymbol: symbol,
-                            quantity: buyOrder.quantity,
-                            price: sellOrder.price
-                        })
-                    });
-                    
-                    matches.push({
-                        buyOrder: buyOrder.id,
-                        sellOrder: sellOrder.id,
-                        price: sellOrder.price,
-                        quantity: buyOrder.quantity
-                    });
-                    
-                    break; // Sortir de la boucle interne
-                }
-            }
-        }
-        
-        res.json({
-            success: true,
-            matches: matches,
-            message: `${matches.length} trades exécutés`
-        });
-        
-    } catch (error) {
-        console.error('❌ Erreur matching:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-
-// Route spécifique pour les balances vault
-app.get("/api/vault-balances/:address", async (req, res) => {
-    const userAddress = req.params.address;
-    
-    try {
-        console.log("🏦 Récupération balances vault pour:", userAddress);
-        
-        // Configuration ethers.js
-        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
-        
-        // Charger les adresses des contrats
-        let addresses;
-        let addressesPath;
-        
-        const possiblePaths = [
-            path.join(__dirname, "../contracts/deployed-addresses.json"),
-            path.join(__dirname, "../contracts/scripts/deployed-addresses.json"),
-            path.join(__dirname, "./deployed-addresses.json")
-        ];
-        
-        for (const testPath of possiblePaths) {
-            if (fs.existsSync(testPath)) {
-                addressesPath = testPath;
-                break;
-            }
-        }
-        
-        addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
-        // Fallback global VAULT -> TradingVault
-        if (!addresses.VAULT && addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-        }
-        if (addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-        }
-        
-        // Charger l'ABI du vault
-        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json"), "utf8")).abi;
-        const vault = new ethers.Contract(addresses.VAULT, vaultABI, provider);
-        
-        // Récupérer les balances vault uniquement
-        const trgVaultBalance = await vault.getBalance(addresses.TRG, userAddress);
-        const clvVaultBalance = await vault.getBalance(addresses.CLV, userAddress);
-        const rooVaultBalance = await vault.getBalance(addresses.ROO, userAddress);
-        
-        const vaultBalances = {
-            TRG: ethers.utils.formatUnits(trgVaultBalance, 18),
-            CLV: ethers.utils.formatUnits(clvVaultBalance, 18),
-            ROO: ethers.utils.formatUnits(rooVaultBalance, 18)
-        };
-        
-        console.log("✅ Balances vault récupérées:", vaultBalances);
-        
-        res.json({
-            success: true,
-            balances: vaultBalances
-        });
-        
-    } catch (error) {
-        console.error("❌ Erreur récupération balances vault:", error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Obtenir l'historique des prix
-app.get('/api/price-history/:symbol', (req, res) => {
-    const symbol = req.params.symbol;
-    
-    db.all(
-        `SELECT * FROM price_history WHERE asset_symbol = ? ORDER BY timestamp ASC`,
-        [symbol],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                res.json({ success: true, history: rows });
-            }
-        }
-    );
-});
-
-// Démarrage du serveur
-app.listen(PORT, () => {
-    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
-    console.log(`📋 API disponible sur http://localhost:${PORT}/api/test`);
-});
-
-// Route pour obtenir les informations d'un actif
-app.get('/api/assets/:symbol', (req, res) => {
-    const symbol = req.params.symbol;
-    
-    const assetInfo = {
-        TRG: { name: 'Triangle Stablecoin', type: 'stablecoin', defaultPrice: 1 },
-        CLV: { name: 'Clove Company Shares', type: 'share', defaultPrice: 10 },
-        ROO: { name: 'Rooibos Limited Shares', type: 'share', defaultPrice: 10 },
-        GOV: { name: 'Government Bonds', type: 'bond', defaultPrice: 200 }
-    };
-
-    if (assetInfo[symbol]) {
-        res.json({
-            success: true,
-            asset: {
-                symbol: symbol,
-                ...assetInfo[symbol]
-            }
-        });
-    } else {
-        res.status(404).json({
-            success: false,
-            error: 'Asset not found'
-        });
-    }
-});
-
-// Route pour obtenir le carnet d'ordres d'un actif
-app.get('/api/orderbook/:symbol', (req, res) => {
-    const symbol = req.params.symbol;
-    
-    db.all(
-        `SELECT * FROM orders WHERE asset_symbol = ? AND status = 'pending' ORDER BY 
-         CASE WHEN order_type = 'sell' THEN price END ASC,
-         CASE WHEN order_type = 'buy' THEN price END DESC`,
-        [symbol],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                const buyOrders = rows.filter(order => order.order_type === 'buy');
-                const sellOrders = rows.filter(order => order.order_type === 'sell');
-                
-                res.json({
-                    success: true,
-                    orderbook: {
-                        buy: buyOrders,
-                        sell: sellOrders
-                    }
-                });
-            }
-        }
-    );
-});
-
-// Route pour obtenir l'historique des prix avec données par défaut
-app.get('/api/price-history/:symbol', (req, res) => {
-    const symbol = req.params.symbol;
-    
-    db.all(
-        `SELECT * FROM price_history WHERE asset_symbol = ? ORDER BY timestamp ASC`,
-        [symbol],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                // Si pas d'historique, créer des données par défaut
-                if (rows.length === 0) {
-                    const defaultPrices = {
-                        TRG: 1,
-                        CLV: 10,
-                        ROO: 10,
-                        GOV: 200
-                    };
-                    
-                    const defaultHistory = [];
-                    const now = new Date();
-                    for (let i = 29; i >= 0; i--) {
-                        const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-                        defaultHistory.push({
-                            asset_symbol: symbol,
-                            price: defaultPrices[symbol] || 10,
-                            timestamp: date.toISOString()
-                        });
-                    }
-                    
-                    res.json({
-                        success: true,
-                        history: defaultHistory
-                    });
-                } else {
-                    res.json({
-                        success: true,
-                        history: rows
-                    });
-                }
-            }
-        }
-    );
-});
-
-// Route pour créer un ordre avec dépôt au vault
-app.post('/api/create-order', async (req, res) => {
-    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
-    
-    try {
-        console.log('📝 Création ordre avec escrow:', { userAddress, assetSymbol, orderType, quantity, price });
-        
-        // Configuration ethers.js
-        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
-        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
-        
-        // Charger les adresses
-        let addresses;
-        const possiblePaths = [
-            path.join(__dirname, "../contracts/deployed-addresses.json"),
-            path.join(__dirname, "../contracts/scripts/deployed-addresses.json")
-        ];
-        
-        for (const testPath of possiblePaths) {
-            if (fs.existsSync(testPath)) {
-                addresses = JSON.parse(fs.readFileSync(testPath, 'utf8'));
-        // Fallback global VAULT -> TradingVault
-        if (!addresses.VAULT && addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-        }
-                break;
-            }
-        }
-        
-        if (addresses.VAULT) {
-            addresses.VAULT = addresses.VAULT;
-        }
-        
-        // Charger les contrats
-        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
-        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json'), 'utf8')).abi;
-        
-        const vault = new ethers.Contract(addresses.VAULT, vaultABI, wallet);
-        
-        // Simuler le dépôt au vault (ici on suppose que l'utilisateur a déjà approuvé)
-        console.log(`📦 Ordre créé - Les fonds seront dans le vault lors de l'exécution`);
-        
-        // Créer l'ordre en base
-        db.run(
-            `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)`,
-            [userAddress, assetSymbol, orderType, quantity, price],
-            function(err) {
-                if (err) {
-                    console.error('Erreur création ordre:', err);
-                    res.status(500).json({ success: false, error: err.message });
-                } else {
-                    console.log('✅ Ordre créé avec ID:', this.lastID);
-                    
-                    // Déclencher le matching automatique
-                    fetch(`http://localhost:3001/api/match-orders/${assetSymbol}`, {
-                        method: 'POST'
-                    }).catch(err => console.log('Matching en arrière-plan:', err.message));
-                    
-                    res.json({ 
-                        success: true, 
-                        orderId: this.lastID,
-                        message: 'Ordre créé avec succès - Matching en cours...'
-                    });
-                }
-            }
-        );
-        
-    } catch (error) {
-        console.error('❌ Erreur création ordre:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// Route pour créer un ordre avec dépôt automatique au vault
-// Route pour créer un ordre simple (sans escrow)
-app.post("/api/create-order-with-deposit", async (req, res) => {
-    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
-    
-    try {
-        console.log("📝 Création ordre SIMPLE:", { userAddress, assetSymbol, orderType, quantity, price });
-        
-        // Créer l'ordre directement en base de données
-        db.run(
-            `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)`,
-            [userAddress, assetSymbol, orderType, quantity, price],
-            function(err) {
-                if (err) {
-                    console.error("Erreur création ordre:", err);
-                    res.status(500).json({ success: false, error: err.message });
-                } else {
-                    console.log("✅ Ordre créé avec ID:", this.lastID);
-                    
-                    // Déclencher le matching automatique
-                    setTimeout(() => {
-                        fetch(`http://localhost:3001/api/match-orders/${assetSymbol}`, {
-                            method: "POST"
-                        }).catch(err => console.log("Matching:", err.message));
-                    }, 1000);
-                    
-                    res.json({ 
-                        success: true, 
-                        orderId: this.lastID,
-                        message: "Ordre créé - Matching en cours..."
-                    });
-                }
-            }
-        );
-        
-    } catch (error) {
-        console.error("❌ Erreur création ordre:", error);
+        console.error('❌ Erreur balances:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -787,30 +191,18 @@ app.get('/api/check-allowance/:userAddress/:tokenSymbol/:amount', async (req, re
     const { userAddress, tokenSymbol, amount } = req.params;
     
     try {
-        const provider = new ethers.providers.JsonRpcProvider("http://localhost:8545");
+        console.log('🔍 Vérification allowance:', { userAddress, tokenSymbol, amount });
         
-        // Charger les adresses
-        let addresses;
-        const possiblePaths = [
-            path.join(__dirname, "../contracts/deployed-addresses.json"),
-            path.join(__dirname, "../contracts/scripts/deployed-addresses.json")
+        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        
+        const tokenABI = [
+            "function allowance(address owner, address spender) view returns (uint256)"
         ];
         
-        for (const testPath of possiblePaths) {
-            if (fs.existsSync(testPath)) {
-                addresses = JSON.parse(fs.readFileSync(testPath, 'utf8'));
-                break;
-            }
-        }
-        
-        if (addresses.VAULT) {
-            addresses.TradingVault = addresses.VAULT;
-        }
-        
-        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json'), 'utf8')).abi;
-        const token = new ethers.Contract(addresses[tokenSymbol], tokenABI, provider);
-        
-        const allowance = await token.allowance(userAddress, addresses.TradingVault);
+        const tokenContract = new ethers.Contract(addresses[tokenSymbol], tokenABI, provider);
+        const allowance = await tokenContract.allowance(userAddress, addresses.TradingVault);
         const requiredAmount = ethers.utils.parseUnits(amount.toString(), 18);
         
         const hasEnoughAllowance = allowance.gte(requiredAmount);
@@ -828,70 +220,472 @@ app.get('/api/check-allowance/:userAddress/:tokenSymbol/:amount', async (req, re
     }
 });
 
-// Route pour créer un ordre avec vérification d'approbation
-app.post('/api/create-order-with-approval', async (req, res) => {
+// Création d'ordres avec approbation
+app.post('/api/create-order-with-approval', (req, res) => {
     const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
     
     try {
         console.log('📝 Création ordre avec approbation:', { userAddress, assetSymbol, orderType, quantity, price });
         
-        // Déterminer quel token et montant sont nécessaires
-        let tokenNeeded, amountNeeded;
-        
-        if (orderType === 'sell') {
-            tokenNeeded = assetSymbol;
-            amountNeeded = quantity;
-        } else {
-            tokenNeeded = 'TRG';
-            amountNeeded = quantity * price;
-        }
-        
-        // Vérifier l'approbation
-        const allowanceResponse = await fetch(`http://localhost:3001/api/check-allowance/${userAddress}/${tokenNeeded}/${amountNeeded}`);
-        const allowanceData = await allowanceResponse.json();
-        
-        if (!allowanceData.hasAllowance) {
-            return res.status(400).json({
-                success: false,
-                error: 'Approbation insuffisante',
-                needsApproval: true,
-                tokenNeeded: tokenNeeded,
-                amountNeeded: amountNeeded
-            });
-        }
-        
-        // Créer l'ordre si approbation OK
         db.run(
-            `INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, status) VALUES (?, ?, ?, ?, ?, 'pending')`,
+            'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
             [userAddress, assetSymbol, orderType, quantity, price],
             function(err) {
                 if (err) {
-                    console.error('Erreur création ordre:', err);
                     res.status(500).json({ success: false, error: err.message });
                 } else {
                     console.log('✅ Ordre créé avec approbation - ID:', this.lastID);
                     
-                    // Déclencher le matching automatique
                     setTimeout(() => {
-                        fetch(`http://localhost:3001/api/match-orders/${assetSymbol}`, {
-                            method: 'POST'
-                        }).catch(err => console.log('Matching:', err.message));
+                        matchOrders(assetSymbol);
                     }, 1000);
                     
                     res.json({ 
                         success: true, 
                         orderId: this.lastID,
-                        message: 'Ordre créé avec approbation - Matching en cours...'
+                        message: 'Ordre créé avec succès' 
                     });
                 }
             }
         );
         
     } catch (error) {
-        console.error('❌ Erreur création ordre avec approbation:', error);
-        res.status(500).json({
+        console.error('❌ Erreur création ordre:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Création d'ordres standard
+app.post('/api/orders', (req, res) => {
+    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
+    
+    db.run(
+        'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
+        [userAddress, assetSymbol, orderType, quantity, price],
+        function(err) {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                console.log('✅ Ordre créé - ID:', this.lastID);
+                
+                setTimeout(() => {
+                    matchOrders(assetSymbol);
+                }, 1000);
+                
+                res.json({ 
+                    success: true, 
+                    orderId: this.lastID,
+                    message: 'Ordre créé avec succès' 
+                });
+            }
+        }
+    );
+});
+
+// Récupération des ordres par asset
+app.get('/api/orders/:symbol', (req, res) => {
+    const { symbol } = req.params;
+    
+    db.all(
+        'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY created_at DESC',
+        [symbol, 'pending'],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, orders: rows });
+            }
+        }
+    );
+});
+
+// Route pour exécuter un trade réel sur blockchain
+
+// Fonction de matching des ordres
+// Fonction de matching avancée avec trades partiels
+async function matchOrders(assetSymbol) {
+    console.log('🎯 Matching orders pour', assetSymbol);
+    
+    return new Promise((resolve) => {
+        db.all(
+            'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY created_at ASC',
+            [assetSymbol, 'pending'],
+            async (err, orders) => {
+                if (err) {
+                    console.error('❌ Erreur matching:', err);
+                    resolve();
+                    return;
+                }
+                
+                const buyOrders = orders.filter(o => o.order_type === 'buy').sort((a, b) => b.price - a.price);
+                const sellOrders = orders.filter(o => o.order_type === 'sell').sort((a, b) => a.price - b.price);
+                
+                console.log('📊 Ordres à matcher:', { 
+                    buy: buyOrders.length, 
+                    sell: sellOrders.length 
+                });
+                
+                // Afficher les ordres pour debugging
+                console.log('🔵 Ordres d\'achat:', buyOrders.map(o => `${o.quantity}@${o.price} (${o.user_address.slice(0,8)})`));
+                console.log('🔴 Ordres de vente:', sellOrders.map(o => `${o.quantity}@${o.price} (${o.user_address.slice(0,8)})`));
+                
+                for (const sellOrder of sellOrders) {
+                    for (const buyOrder of buyOrders) {
+                        // Condition de matching : prix compatible et utilisateurs différents
+                        if (buyOrder.price >= sellOrder.price && 
+                            buyOrder.user_address !== sellOrder.user_address &&
+                            buyOrder.quantity > 0 && sellOrder.quantity > 0) {
+                            
+                            // Déterminer la quantité à échanger (minimum des deux)
+                            const tradeQuantity = Math.min(buyOrder.quantity, sellOrder.quantity);
+                            
+                            console.log('💥 Match trouvé!', {
+                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG`,
+                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG`,
+                                tradeQuantity: tradeQuantity,
+                                type: tradeQuantity === buyOrder.quantity && tradeQuantity === sellOrder.quantity ? 'FULL' :
+                                      tradeQuantity === buyOrder.quantity ? 'BUY_FILLED' :
+                                      tradeQuantity === sellOrder.quantity ? 'SELL_FILLED' : 'PARTIAL'
+                            });
+                            
+                            try {
+                                // Exécuter le trade sur la blockchain
+                                const response = await fetch('http://localhost:3001/api/execute-trade', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        buyerAddress: buyOrder.user_address,
+                                        sellerAddress: sellOrder.user_address,
+                                        assetSymbol: assetSymbol,
+                                        quantity: tradeQuantity,
+                                        price: sellOrder.price // Utiliser le prix du vendeur
+                                    })
+                                });
+                                
+                                const result = await response.json();
+                                
+                                if (result.success) {
+                                    console.log('✅ Trade exécuté avec succès!');
+                                    
+                                    // Mettre à jour les quantités des ordres
+                                    const newBuyQuantity = buyOrder.quantity - tradeQuantity;
+                                    const newSellQuantity = sellOrder.quantity - tradeQuantity;
+                                    
+                                    // Mettre à jour l'ordre d'achat
+                                    if (newBuyQuantity <= 0) {
+                                        // Ordre d'achat complètement rempli
+                                        await new Promise((resolve, reject) => {
+                                            db.run(
+                                                'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
+                                                ['filled', buyOrder.id],
+                                                (err) => err ? reject(err) : resolve()
+                                            );
+                                        });
+                                        console.log('🔵 Ordre d\'achat complètement rempli');
+                                    } else {
+                                        // Ordre d'achat partiellement rempli
+                                        await new Promise((resolve, reject) => {
+                                            db.run(
+                                                'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
+                                                [newBuyQuantity, 'partial', buyOrder.id],
+                                                (err) => err ? reject(err) : resolve()
+                                            );
+                                        });
+                                        console.log('🔵 Ordre d\'achat partiellement rempli:', newBuyQuantity, 'restant');
+                                    }
+                                    
+                                    // Mettre à jour l'ordre de vente
+                                    if (newSellQuantity <= 0) {
+                                        // Ordre de vente complètement rempli
+                                        await new Promise((resolve, reject) => {
+                                            db.run(
+                                                'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
+                                                ['filled', sellOrder.id],
+                                                (err) => err ? reject(err) : resolve()
+                                            );
+                                        });
+                                        console.log('🔴 Ordre de vente complètement rempli');
+                                    } else {
+                                        // Ordre de vente partiellement rempli
+                                        await new Promise((resolve, reject) => {
+                                            db.run(
+                                                'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
+                                                [newSellQuantity, 'partial', sellOrder.id],
+                                                (err) => err ? reject(err) : resolve()
+                                            );
+                                        });
+                                        console.log('🔴 Ordre de vente partiellement rempli:', newSellQuantity, 'restant');
+                                    }
+                                    
+                                } else {
+                                    console.log('❌ Erreur lors du trade:', result.error);
+                                }
+                                
+                            } catch (error) {
+                                console.error('❌ Erreur exécution trade:', error.message);
+                            }
+                            
+                            // Continuer à chercher d'autres matches possibles
+                            resolve();
+                            return;
+                        }
+                    }
+                }
+                
+                console.log('⏸️ Aucun match trouvé pour', assetSymbol);
+                resolve();
+            }
+        );
+    });
+}
+// Route pour exécuter un trade réel - VERSION CORRIGÉE
+
+
+// Route corrigée utilisant vault.executeTrade()
+app.post("/api/execute-trade", async (req, res) => {
+    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
+    
+    try {
+        console.log("🔗 Exécution trade via vault.executeTrade():", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
+        
+        const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
+        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        
+        const addressesPath = path.join(__dirname, "deployed-addresses.json");
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
+        
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json"), "utf8")).abi;
+        const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
+        
+        const quantityWei = ethers.utils.parseEther(quantity.toString());
+        const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
+        
+        console.log("📋 Appel vault.executeTrade()...");
+        
+        const tradeTx = await vaultContract.executeTrade(
+            addresses[assetSymbol],
+            addresses.TRG,
+            sellerAddress,
+            buyerAddress,
+            quantityWei,
+            totalPriceWei
+        );
+        
+        await tradeTx.wait();
+        console.log("✅ Trade exécuté via vault.executeTrade()!");
+        
+        // NOUVEAU : Enregistrer le trade dans l'historique
+        await new Promise((resolve, reject) => {
+            db.run(
+                `INSERT INTO trades (asset_symbol, buyer_address, seller_address, quantity, price, total_amount, tx_hash) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [assetSymbol, buyerAddress, sellerAddress, quantity, price, quantity * price, tradeTx.hash],
+                function(err) {
+                    if (err) {
+                        console.error('❌ Erreur enregistrement trade:', err);
+                        reject(err);
+                    } else {
+                        console.log('📝 Trade enregistré dans l\'historique - ID:', this.lastID);
+                        resolve();
+                    }
+                }
+            );
+        });
+        
+        await new Promise((resolve, reject) => {
+            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
+                ["filled", assetSymbol, "sell", sellerAddress, "pending"],
+                function(err) { if (err) reject(err); else resolve(); }
+            );
+        });
+        
+        await new Promise((resolve, reject) => {
+            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
+                ["filled", assetSymbol, "buy", buyerAddress, "pending"],
+                function(err) { if (err) reject(err); else resolve(); }
+            );
+        });
+        
+        res.json({
+            success: true,
+            message: "Trade exécuté via vault.executeTrade()",
+            transactionDetails: {
+                asset: `${quantity} ${assetSymbol}`,
+                payment: `${quantity * price} TRG`,
+                buyer: buyerAddress,
+                seller: sellerAddress,
+                txHash: tradeTx.hash
+            }
+        });
+        
+    } catch (error) {
+        console.error("❌ Erreur vault.executeTrade():", error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+app.listen(PORT, () => {
+    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
+    console.log(`📋 API disponible sur http://localhost:${PORT}/api/test`);
+});
+
+// Route pour récupérer les données d'un asset
+app.get('/api/assets/:symbol', (req, res) => {
+    const { symbol } = req.params;
+    
+    // Données statiques des assets
+    const assetData = {
+        CLV: {
+            symbol: 'CLV',
+            name: 'Clove Company',
+            type: 'share',
+            currentPrice: 10,
+            description: 'Actions de Clove Company',
+            totalSupply: 100
+        },
+        ROO: {
+            symbol: 'ROO', 
+            name: 'Rooibos Limited',
+            type: 'share',
+            currentPrice: 10,
+            description: 'Actions de Rooibos Limited',
+            totalSupply: 100
+        },
+        GOV: {
+            symbol: 'GOV',
+            name: 'Government Bonds',
+            type: 'bond',
+            currentPrice: 200,
+            description: 'Obligations gouvernementales (10% intérêt, 1 an)',
+            totalSupply: 20
+        }
+    };
+    
+    const asset = assetData[symbol];
+    
+    if (asset) {
+        console.log('📋 Asset data pour', symbol, ':', asset);
+        res.json({
+            success: true,
+            asset: asset
+        });
+    } else {
+        res.status(404).json({
             success: false,
-            error: error.message
+            error: `Asset ${symbol} non trouvé`
         });
     }
+});
+
+// Route pour récupérer le carnet d'ordres (orderbook)
+app.get('/api/orderbook/:symbol', (req, res) => {
+    const { symbol } = req.params;
+    
+    console.log('📊 Récupération orderbook pour:', symbol);
+    
+    db.all(
+        'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY price DESC, created_at ASC',
+        [symbol, 'pending'],
+        (err, orders) => {
+            if (err) {
+                console.error('❌ Erreur orderbook:', err);
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                // Séparer les ordres d'achat et de vente
+                const buyOrders = orders.filter(o => o.order_type === 'buy');
+                const sellOrders = orders.filter(o => o.order_type === 'sell');
+                
+                console.log('📈 Orderbook', symbol, '- Buy:', buyOrders.length, 'Sell:', sellOrders.length);
+                
+                res.json({
+                    success: true,
+                    orderbook: {
+                        symbol: symbol,
+                        buyOrders: buyOrders,
+                        sellOrders: sellOrders,
+                        totalOrders: orders.length
+                    }
+                });
+            }
+        }
+    );
+});
+
+
+// Route pour récupérer l'historique des trades d'un utilisateur
+app.get('/api/trades/:userAddress', (req, res) => {
+    const { userAddress } = req.params;
+    
+    db.all(
+        `SELECT * FROM trades 
+         WHERE buyer_address = ? OR seller_address = ? 
+         ORDER BY created_at DESC 
+         LIMIT 50`,
+        [userAddress, userAddress],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                const trades = rows.map(trade => ({
+                    ...trade,
+                    side: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() ? 'buy' : 'sell',
+                    counterparty: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() 
+                        ? trade.seller_address 
+                        : trade.buyer_address
+                }));
+                
+                res.json({ 
+                    success: true, 
+                    trades: trades,
+                    total: rows.length 
+                });
+            }
+        }
+    );
+});
+
+// Route pour l'historique global des trades par asset
+app.get('/api/trades/asset/:symbol', (req, res) => {
+    const { symbol } = req.params;
+    
+    db.all(
+        'SELECT * FROM trades WHERE asset_symbol = ? ORDER BY created_at DESC LIMIT 20',
+        [symbol],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, trades: rows });
+            }
+        }
+    );
+});
+
+// Route pour vérifier si un utilisateur est inscrit
+app.get('/api/check-registration/:address', (req, res) => {
+    const { address } = req.params;
+    
+    db.get(
+        'SELECT * FROM users WHERE wallet_address = ?',
+        [address],
+        (err, row) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else if (row) {
+                res.json({ 
+                    success: true, 
+                    registered: true, 
+                    user: { 
+                        wallet_address: row.wallet_address,
+                        legal_name: row.legal_name,
+                        created_at: row.created_at
+                    }
+                });
+            } else {
+                res.json({ success: true, registered: false });
+            }
+        }
+    );
 });

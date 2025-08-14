@@ -1,0 +1,34 @@
+        await tradeTx.wait();
+        console.log("✅ Trade exécuté via vault.executeTrade()!");
+        
+        // NOUVEAU : Enregistrer le trade dans l'historique
+        await new Promise((resolve, reject) => {
+            db.run(
+                `INSERT INTO trades (asset_symbol, buyer_address, seller_address, quantity, price, total_amount, tx_hash) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [assetSymbol, buyerAddress, sellerAddress, quantity, price, quantity * price, tradeTx.hash],
+                function(err) {
+                    if (err) {
+                        console.error('❌ Erreur enregistrement trade:', err);
+                        reject(err);
+                    } else {
+                        console.log('📝 Trade enregistré dans l\'historique - ID:', this.lastID);
+                        resolve();
+                    }
+                }
+            );
+        });
+        
+        await new Promise((resolve, reject) => {
+            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
+                ["filled", assetSymbol, "sell", sellerAddress, "pending"],
+                function(err) { if (err) reject(err); else resolve(); }
+            );
+        });
+        
+        await new Promise((resolve, reject) => {
+            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
+                ["filled", assetSymbol, "buy", buyerAddress, "pending"],
+                function(err) { if (err) reject(err); else resolve(); }
+            );
+        });
