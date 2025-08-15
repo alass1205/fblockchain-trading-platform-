@@ -2,8 +2,8 @@
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
-  "/": "pages/index.js",
   "/portfolio": "pages/portfolio.js",
-  "/trades": "pages/trades.js",
-  "/assets/[symbol]": "pages/assets/[symbol].js"
+  "/": "pages/index.js",
+  "/assets/[symbol]": "pages/assets/[symbol].js",
+  "/trades": "pages/trades.js"
 }

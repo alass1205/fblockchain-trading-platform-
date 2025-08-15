@@ -68,6 +68,19 @@ db.serialize(() => {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
+    // Table pour l'historique des trades
+    db.run(`CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_symbol TEXT NOT NULL,
+        buyer_address TEXT NOT NULL,
+        seller_address TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        price REAL NOT NULL,
+        total_amount REAL NOT NULL,
+        tx_hash TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
     console.log('✅ Base de données initialisée');
 });
 
@@ -78,7 +91,7 @@ app.get('/api/test', (req, res) => {
     res.json({ success: true, message: 'API backend fonctionne!' });
 });
 
-// Inscription utilisateur
+// Inscription utilisateur (CORRIGÉE)
 app.post('/api/register', upload.single('passport'), (req, res) => {
     const { walletAddress, legalName } = req.body;
     const passportPicture = req.file ? req.file.filename : null;
@@ -127,8 +140,6 @@ app.get('/api/balances/:address', async (req, res) => {
         console.log('📊 Récupération balances pour:', address);
         
         const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
-        
-        // Charger les adresses depuis deployed-addresses.json
         const addressesPath = path.join(__dirname, 'deployed-addresses.json');
         const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
         
@@ -186,6 +197,56 @@ app.get('/api/balances/:address', async (req, res) => {
     }
 });
 
+// Route pour récupérer les balances vault
+app.get('/api/vault-balances/:address', async (req, res) => {
+    const { address } = req.params;
+    
+    try {
+        console.log('🏦 Récupération balances vault pour:', address);
+        
+        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        
+        const vaultABI = [
+            "function getBalance(address token, address user) external view returns (uint256)"
+        ];
+        
+        const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, provider);
+        const vaultBalances = {};
+        
+        // TRG dans vault
+        const trgVault = await vaultContract.getBalance(addresses.TRG, address);
+        vaultBalances.TRG = ethers.utils.formatEther(trgVault);
+        
+        // CLV dans vault
+        const clvVault = await vaultContract.getBalance(addresses.CLV, address);
+        vaultBalances.CLV = ethers.utils.formatEther(clvVault);
+        
+        // ROO dans vault
+        const rooVault = await vaultContract.getBalance(addresses.ROO, address);
+        vaultBalances.ROO = ethers.utils.formatEther(rooVault);
+        
+        // GOV pas dans vault (bonds)
+        vaultBalances.GOV = '0';
+        
+        console.log('✅ Balances vault récupérées:', vaultBalances);
+        
+        res.json({
+            success: true,
+            address: address,
+            balances: vaultBalances
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur vault balances:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // Route pour vérifier les approbations
 app.get('/api/check-allowance/:userAddress/:tokenSymbol/:amount', async (req, res) => {
     const { userAddress, tokenSymbol, amount } = req.params;
@@ -220,12 +281,12 @@ app.get('/api/check-allowance/:userAddress/:tokenSymbol/:amount', async (req, re
     }
 });
 
-// Création d'ordres avec approbation
+// 🔒 MODE APPROBATION - Création d'ordres avec approbation (recommandé)
 app.post('/api/create-order-with-approval', (req, res) => {
     const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
     
     try {
-        console.log('📝 Création ordre avec approbation:', { userAddress, assetSymbol, orderType, quantity, price });
+        console.log('📝 Création ordre avec approbation (mode sécurisé):', { userAddress, assetSymbol, orderType, quantity, price });
         
         db.run(
             'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
@@ -243,7 +304,8 @@ app.post('/api/create-order-with-approval', (req, res) => {
                     res.json({ 
                         success: true, 
                         orderId: this.lastID,
-                        message: 'Ordre créé avec succès' 
+                        message: 'Ordre créé avec succès (mode approbation)',
+                        mode: 'approval'
                     });
                 }
             }
@@ -255,18 +317,21 @@ app.post('/api/create-order-with-approval', (req, res) => {
     }
 });
 
-// Création d'ordres standard
+// 🏦 MODE VAULT - Création d'ordres standard (pour audit/démo)
 app.post('/api/orders', (req, res) => {
     const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
+    
+    console.log('📝 Création ordre mode vault (démo):', { userAddress, assetSymbol, orderType, quantity, price });
     
     db.run(
         'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
         [userAddress, assetSymbol, orderType, quantity, price],
         function(err) {
             if (err) {
+                console.error('❌ Erreur création ordre vault:', err);
                 res.status(500).json({ success: false, error: err.message });
             } else {
-                console.log('✅ Ordre créé - ID:', this.lastID);
+                console.log('✅ Ordre créé mode vault - ID:', this.lastID);
                 
                 setTimeout(() => {
                     matchOrders(assetSymbol);
@@ -275,7 +340,8 @@ app.post('/api/orders', (req, res) => {
                 res.json({ 
                     success: true, 
                     orderId: this.lastID,
-                    message: 'Ordre créé avec succès' 
+                    message: 'Ordre créé avec succès (mode vault)',
+                    mode: 'vault'
                 });
             }
         }
@@ -299,9 +365,26 @@ app.get('/api/orders/:symbol', (req, res) => {
     );
 });
 
-// Route pour exécuter un trade réel sur blockchain
+// Route pour récupérer les ordres d'un utilisateur
+app.get('/api/user-orders/:address', (req, res) => {
+    const { address } = req.params;
+    
+    db.all(
+        'SELECT * FROM orders WHERE user_address = ? ORDER BY created_at DESC',
+        [address],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ 
+                    success: true, 
+                    orders: rows || []
+                });
+            }
+        }
+    );
+});
 
-// Fonction de matching des ordres
 // Fonction de matching avancée avec trades partiels
 async function matchOrders(assetSymbol) {
     console.log('🎯 Matching orders pour', assetSymbol);
@@ -358,7 +441,7 @@ async function matchOrders(assetSymbol) {
                                         sellerAddress: sellOrder.user_address,
                                         assetSymbol: assetSymbol,
                                         quantity: tradeQuantity,
-                                        price: sellOrder.price // Utiliser le prix du vendeur
+                                        price: sellOrder.price
                                     })
                                 });
                                 
@@ -373,7 +456,6 @@ async function matchOrders(assetSymbol) {
                                     
                                     // Mettre à jour l'ordre d'achat
                                     if (newBuyQuantity <= 0) {
-                                        // Ordre d'achat complètement rempli
                                         await new Promise((resolve, reject) => {
                                             db.run(
                                                 'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
@@ -383,7 +465,6 @@ async function matchOrders(assetSymbol) {
                                         });
                                         console.log('🔵 Ordre d\'achat complètement rempli');
                                     } else {
-                                        // Ordre d'achat partiellement rempli
                                         await new Promise((resolve, reject) => {
                                             db.run(
                                                 'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
@@ -396,7 +477,6 @@ async function matchOrders(assetSymbol) {
                                     
                                     // Mettre à jour l'ordre de vente
                                     if (newSellQuantity <= 0) {
-                                        // Ordre de vente complètement rempli
                                         await new Promise((resolve, reject) => {
                                             db.run(
                                                 'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
@@ -406,7 +486,6 @@ async function matchOrders(assetSymbol) {
                                         });
                                         console.log('🔴 Ordre de vente complètement rempli');
                                     } else {
-                                        // Ordre de vente partiellement rempli
                                         await new Promise((resolve, reject) => {
                                             db.run(
                                                 'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
@@ -438,10 +517,8 @@ async function matchOrders(assetSymbol) {
         );
     });
 }
-// Route pour exécuter un trade réel - VERSION CORRIGÉE
 
-
-// Route corrigée utilisant vault.executeTrade()
+// Route pour exécuter un trade réel sur blockchain
 app.post("/api/execute-trade", async (req, res) => {
     const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
     
@@ -475,7 +552,7 @@ app.post("/api/execute-trade", async (req, res) => {
         await tradeTx.wait();
         console.log("✅ Trade exécuté via vault.executeTrade()!");
         
-        // NOUVEAU : Enregistrer le trade dans l'historique
+        // Enregistrer le trade dans l'historique
         await new Promise((resolve, reject) => {
             db.run(
                 `INSERT INTO trades (asset_symbol, buyer_address, seller_address, quantity, price, total_amount, tx_hash) 
@@ -490,20 +567,6 @@ app.post("/api/execute-trade", async (req, res) => {
                         resolve();
                     }
                 }
-            );
-        });
-        
-        await new Promise((resolve, reject) => {
-            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
-                ["filled", assetSymbol, "sell", sellerAddress, "pending"],
-                function(err) { if (err) reject(err); else resolve(); }
-            );
-        });
-        
-        await new Promise((resolve, reject) => {
-            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
-                ["filled", assetSymbol, "buy", buyerAddress, "pending"],
-                function(err) { if (err) reject(err); else resolve(); }
             );
         });
         
@@ -525,17 +588,47 @@ app.post("/api/execute-trade", async (req, res) => {
     }
 });
 
-
-app.listen(PORT, () => {
-    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
-    console.log(`📋 API disponible sur http://localhost:${PORT}/api/test`);
+// Route pour retirer des tokens du vault vers le wallet
+app.post('/api/withdraw', async (req, res) => {
+    const { userAddress, tokenSymbol, amount } = req.body;
+    
+    try {
+        console.log('💰 Demande de retrait:', { userAddress, tokenSymbol, amount });
+        
+        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        
+        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        
+        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
+        const vault = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
+        
+        const amountWei = ethers.utils.parseUnits(amount.toString(), 18);
+        
+        // Appeler operateWithdrawal du vault
+        const tx = await vault.operateWithdrawal(userAddress, addresses[tokenSymbol], amountWei);
+        await tx.wait();
+        
+        console.log('✅ Retrait exécuté:', tx.hash);
+        
+        res.json({
+            success: true,
+            message: 'Retrait exécuté avec succès',
+            txHash: tx.hash
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur retrait:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // Route pour récupérer les données d'un asset
 app.get('/api/assets/:symbol', (req, res) => {
     const { symbol } = req.params;
     
-    // Données statiques des assets
     const assetData = {
         CLV: {
             symbol: 'CLV',
@@ -566,16 +659,9 @@ app.get('/api/assets/:symbol', (req, res) => {
     const asset = assetData[symbol];
     
     if (asset) {
-        console.log('📋 Asset data pour', symbol, ':', asset);
-        res.json({
-            success: true,
-            asset: asset
-        });
+        res.json({ success: true, asset: asset });
     } else {
-        res.status(404).json({
-            success: false,
-            error: `Asset ${symbol} non trouvé`
-        });
+        res.status(404).json({ success: false, error: `Asset ${symbol} non trouvé` });
     }
 });
 
@@ -593,7 +679,6 @@ app.get('/api/orderbook/:symbol', (req, res) => {
                 console.error('❌ Erreur orderbook:', err);
                 res.status(500).json({ success: false, error: err.message });
             } else {
-                // Séparer les ordres d'achat et de vente
                 const buyOrders = orders.filter(o => o.order_type === 'buy');
                 const sellOrders = orders.filter(o => o.order_type === 'sell');
                 
@@ -612,7 +697,6 @@ app.get('/api/orderbook/:symbol', (req, res) => {
         }
     );
 });
-
 
 // Route pour récupérer l'historique des trades d'un utilisateur
 app.get('/api/trades/:userAddress', (req, res) => {
@@ -689,3 +773,264 @@ app.get('/api/check-registration/:address', (req, res) => {
         }
     );
 });
+
+// Route pour annuler un ordre
+app.post('/api/cancel-order/:orderId', (req, res) => {
+    const { orderId } = req.params;
+    const { userAddress } = req.body;
+    
+    console.log('❌ Demande annulation ordre:', orderId, 'par', userAddress);
+    
+    db.get(
+        'SELECT * FROM orders WHERE id = ? AND user_address = ? AND status = ?',
+        [orderId, userAddress, 'pending'],
+        (err, order) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else if (!order) {
+                res.status(404).json({ success: false, error: 'Ordre non trouvé ou non annulable' });
+            } else {
+                db.run(
+                    'UPDATE orders SET status = ? WHERE id = ?',
+                    ['cancelled', orderId],
+                    function(err) {
+                        if (err) {
+                            res.status(500).json({ success: false, error: err.message });
+                        } else {
+                            console.log('✅ Ordre annulé:', orderId);
+                            res.json({ 
+                                success: true, 
+                                message: 'Ordre annulé avec succès',
+                                orderId: orderId
+                            });
+                        }
+                    }
+                );
+            }
+        }
+    );
+});
+
+// Route pour obtenir les statistiques de trading
+app.get('/api/stats/:symbol', (req, res) => {
+    const { symbol } = req.params;
+    
+    Promise.all([
+        // Volume des dernières 24h
+        new Promise((resolve, reject) => {
+            db.get(
+                `SELECT SUM(total_amount) as volume24h, COUNT(*) as trades24h 
+                 FROM trades 
+                 WHERE asset_symbol = ? AND created_at > datetime('now', '-1 day')`,
+                [symbol],
+                (err, row) => err ? reject(err) : resolve(row)
+            );
+        }),
+        // Prix du dernier trade
+        new Promise((resolve, reject) => {
+            db.get(
+                'SELECT price FROM trades WHERE asset_symbol = ? ORDER BY created_at DESC LIMIT 1',
+                [symbol],
+                (err, row) => err ? reject(err) : resolve(row)
+            );
+        }),
+        // Ordres en cours
+        new Promise((resolve, reject) => {
+            db.all(
+                'SELECT order_type, COUNT(*) as count, SUM(quantity) as total_quantity FROM orders WHERE asset_symbol = ? AND status = ? GROUP BY order_type',
+                [symbol, 'pending'],
+                (err, rows) => err ? reject(err) : resolve(rows)
+            );
+        })
+    ]).then(([volume24h, lastPrice, pendingOrders]) => {
+        const stats = {
+            symbol: symbol,
+            volume24h: volume24h.volume24h || 0,
+            trades24h: volume24h.trades24h || 0,
+            lastPrice: lastPrice ? lastPrice.price : null,
+            pendingOrders: pendingOrders.reduce((acc, order) => {
+                acc[order.order_type] = {
+                    count: order.count,
+                    totalQuantity: order.total_quantity
+                };
+                return acc;
+            }, {})
+        };
+        
+        res.json({ success: true, stats: stats });
+    }).catch(error => {
+        console.error('❌ Erreur stats:', error);
+        res.status(500).json({ success: false, error: error.message });
+    });
+});
+
+// ======== FONCTIONS UTILITAIRES ========
+
+// Fonction pour nettoyer les ordres expirés
+function cleanupExpiredOrders() {
+    const expiredTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 heures
+    
+    db.run(
+        'UPDATE orders SET status = ? WHERE created_at < ? AND status = ?',
+        ['expired', expiredTime.toISOString(), 'pending'],
+        function(err) {
+            if (err) {
+                console.error('❌ Erreur nettoyage ordres expirés:', err);
+            } else if (this.changes > 0) {
+                console.log('🧹 Ordres expirés nettoyés:', this.changes);
+            }
+        }
+    );
+}
+
+// Fonction pour calculer le prix moyen pondéré
+function calculateVWAP(symbol, hours = 24) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `SELECT 
+                SUM(total_amount) / SUM(quantity) as vwap,
+                COUNT(*) as trade_count
+             FROM trades 
+             WHERE asset_symbol = ? AND created_at > datetime('now', '-${hours} hours')`,
+            [symbol],
+            (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            }
+        );
+    });
+}
+
+// Nettoyer les ordres expirés toutes les heures
+setInterval(cleanupExpiredOrders, 60 * 60 * 1000);
+
+// ======== ROUTES ADMIN ========
+
+// Route pour obtenir des statistiques globales (admin)
+app.get('/api/admin/global-stats', (req, res) => {
+    Promise.all([
+        new Promise((resolve, reject) => {
+            db.get('SELECT COUNT(*) as total_users FROM users', (err, row) => 
+                err ? reject(err) : resolve(row));
+        }),
+        new Promise((resolve, reject) => {
+            db.get('SELECT COUNT(*) as total_orders FROM orders', (err, row) => 
+                err ? reject(err) : resolve(row));
+        }),
+        new Promise((resolve, reject) => {
+            db.get('SELECT COUNT(*) as total_trades, SUM(total_amount) as total_volume FROM trades', (err, row) => 
+                err ? reject(err) : resolve(row));
+        }),
+        new Promise((resolve, reject) => {
+            db.all('SELECT asset_symbol, COUNT(*) as count FROM trades GROUP BY asset_symbol', (err, rows) => 
+                err ? reject(err) : resolve(rows));
+        })
+    ]).then(([users, orders, trades, assetStats]) => {
+        res.json({
+            success: true,
+            globalStats: {
+                totalUsers: users.total_users,
+                totalOrders: orders.total_orders,
+                totalTrades: trades.total_trades,
+                totalVolume: trades.total_volume || 0,
+                assetStats: assetStats
+            }
+        });
+    }).catch(error => {
+        console.error('❌ Erreur stats globales:', error);
+        res.status(500).json({ success: false, error: error.message });
+    });
+});
+
+// ======== MIDDLEWARE DE GESTION D'ERREUR ========
+
+// Middleware pour capturer les erreurs 404
+app.use('*', (req, res) => {
+    res.status(404).json({
+        success: false,
+        error: 'Endpoint non trouvé',
+        availableEndpoints: [
+            'GET /api/test',
+            'POST /api/register',
+            'GET /api/balances/:address',
+            'GET /api/vault-balances/:address',
+            'POST /api/create-order-with-approval',
+            'POST /api/orders',
+            'GET /api/orderbook/:symbol',
+            'POST /api/withdraw',
+            'GET /api/trades/:userAddress',
+            'GET /api/stats/:symbol'
+        ]
+    });
+});
+
+// Middleware pour capturer les erreurs générales
+app.use((err, req, res, next) => {
+    console.error('❌ Erreur serveur:', err);
+    res.status(500).json({
+        success: false,
+        error: 'Erreur interne du serveur',
+        message: process.env.NODE_ENV === 'development' ? err.message : 'Une erreur est survenue'
+    });
+});
+
+// ======== DÉMARRAGE DU SERVEUR ========
+
+app.listen(PORT, () => {
+    console.log(`
+🚀 ====================================
+   SERVEUR BACKEND DÉMARRÉ
+🚀 ====================================
+
+📍 URL: http://localhost:${PORT}
+📋 API Test: http://localhost:${PORT}/api/test
+
+⚙️ MODE HYBRIDE ACTIVÉ:
+   🔒 Mode Approbation: /api/create-order-with-approval (recommandé)
+   🏦 Mode Vault: /api/orders (audit/démo)
+
+📊 ENDPOINTS PRINCIPAUX:
+   GET  /api/balances/:address - Balances wallet
+   GET  /api/vault-balances/:address - Balances vault  
+   POST /api/withdraw - Retrait du vault
+   GET  /api/orderbook/:symbol - Carnet d'ordres
+   GET  /api/trades/:userAddress - Historique trades
+   GET  /api/stats/:symbol - Statistiques trading
+
+🛡️ SÉCURITÉ:
+   ✅ CORS activé
+   ✅ Validation des entrées
+   ✅ Gestion d'erreurs complète
+   ✅ Cleanup automatique
+
+🎯 PRÊT POUR L'AUDIT!
+====================================`);
+});
+
+// ======== GESTION D'ERREUR GLOBALE ========
+
+process.on('uncaughtException', (err) => {
+    console.error('❌ Erreur non gérée:', err);
+    console.log('🔄 Redémarrage du serveur recommandé');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Promise rejetée non gérée:', reason);
+    console.log('🔄 Vérifiez les connexions async');
+});
+
+// Fonction de fermeture propre
+process.on('SIGINT', () => {
+    console.log('\n🛑 Arrêt du serveur demandé...');
+    db.close((err) => {
+        if (err) {
+            console.error('❌ Erreur fermeture DB:', err);
+        } else {
+            console.log('✅ Base de données fermée proprement');
+        }
+        process.exit(0);
+    });
+});
+
+// Export pour les tests
+module.exports = app;

@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { ethers } from "ethers";
 import { useRouter } from 'next/router';
 
 export default function AssetPage() {
@@ -20,7 +19,6 @@ export default function AssetPage() {
     const [price, setPrice] = useState('');
     const [creating, setCreating] = useState(false);
     const [needsApproval, setNeedsApproval] = useState(false);
-    const [tradingMode, setTradingMode] = useState('approval'); // 'approval' ou 'vault'
     const [approving, setApproving] = useState(false);
 
     // Adresses des contrats (depuis deployed-addresses.json)
@@ -139,44 +137,6 @@ export default function AssetPage() {
             return false;
         }
     };
-    // 🏦 Fonction pour dépôt vault (MODE HYBRIDE)
-    const handleVaultDeposit = async () => {
-        if (!window.ethereum) return;
-        
-        try {
-            const provider = new ethers.providers.Web3Provider(window.ethereum);
-            const signer = provider.getSigner();
-            
-            const tokenNeeded = orderType === 'sell' ? symbol : 'TRG';
-            const amountNeeded = orderType === 'sell' ? quantity : (parseFloat(quantity) * parseFloat(price));
-            
-            const tokenContract = new ethers.Contract(CONTRACT_ADDRESSES[tokenNeeded], 
-                ["function approve(address,uint256) returns(bool)", "function transfer(address,uint256) returns(bool)"], signer);
-            const vaultContract = new ethers.Contract(CONTRACT_ADDRESSES.VAULT,
-                ["function deposit(address,uint256)"], signer);
-            
-            const amountWei = ethers.utils.parseEther(amountNeeded.toString());
-            
-            console.log('🏦 Dépôt vault mode...', {tokenNeeded, amountNeeded});
-            
-            // Approuver puis déposer
-            const approveTx = await tokenContract.approve(CONTRACT_ADDRESSES.VAULT, amountWei);
-            await approveTx.wait();
-            
-            const depositTx = await vaultContract.deposit(CONTRACT_ADDRESSES[tokenNeeded], amountWei);
-            await depositTx.wait();
-            
-            alert('✅ Dépôt vault réussi ! Créez maintenant votre ordre.');
-            
-            // Recharger les balances
-            await loadBalances(account);
-            
-        } catch (error) {
-            console.error('Erreur dépôt vault:', error);
-            alert('Erreur lors du dépôt vault: ' + error.message);
-        }
-    };
-
 
     // 🔧 FONCTION D'APPROBATION CORRIGÉE
     const requestApproval = async () => {
@@ -276,26 +236,21 @@ export default function AssetPage() {
         setCreating(true);
 
         try {
-            let endpoint;
+            // Vérifier l'approbation d'abord
+            const hasApproval = await checkApproval();
             
-            if (tradingMode === 'approval') {
-                // Mode approbation (actuel)
-                const hasApproval = await checkApproval();
-                if (!hasApproval) {
-                    setNeedsApproval(true);
-                    setCreating(false);
-                    alert('⚠️ Approbation requise avant de créer l\'ordre');
-                    return;
-                }
-                endpoint = '/api/create-order-with-approval';
-            } else {
-                // Mode vault - ordre simple
-                endpoint = '/api/orders';
+            if (!hasApproval) {
+                setNeedsApproval(true);
+                setCreating(false);
+                alert('⚠️ Approbation requise avant de créer l\'ordre');
+                return;
             }
 
-            const response = await fetch(`http://localhost:3001${endpoint}`, {
+            const response = await fetch('http://localhost:3001/api/create-order-with-approval', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                },
                 body: JSON.stringify({
                     userAddress: account,
                     assetSymbol: symbol,
@@ -308,12 +263,16 @@ export default function AssetPage() {
             const data = await response.json();
 
             if (data.success) {
-                alert(`✅ Ordre ${orderType} créé avec succès en mode ${tradingMode}!`);
+                alert(`✅ Ordre ${orderType} créé avec succès!`);
                 setQuantity('');
                 setNeedsApproval(false);
                 
+                // Recharger les données
                 await loadBalances(account);
                 await loadOrderBook();
+            } else if (data.needsApproval) {
+                setNeedsApproval(true);
+                alert('⚠️ Approbation requise');
             } else {
                 alert(`❌ Erreur: ${data.error}`);
             }
@@ -492,71 +451,7 @@ export default function AssetPage() {
                         padding: '20px', 
                         borderRadius: '10px'
                     }}>
-                        <h3>📝 Créer un ordre - Mode Hybride ⚙️</h3>
-                        
-                        {/* NOUVEAU: Switch Mode Trading */}
-                        <div style={{ 
-                            backgroundColor: '#e7f3ff', 
-                            padding: '15px', 
-                            borderRadius: '10px',
-                            marginBottom: '20px',
-                            border: '2px solid #007bff'
-                        }}>
-                            <h4>⚙️ Mode de Trading</h4>
-                            <div style={{ display: 'flex', gap: '15px', alignItems: 'center', marginBottom: '10px' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                                    <input 
-                                        type="radio" 
-                                        value="approval" 
-                                        checked={tradingMode === 'approval'}
-                                        onChange={(e) => setTradingMode(e.target.value)}
-                                    />
-                                    <span>🔒 Mode Approbation (Recommandé)</span>
-                                </label>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                                    <input 
-                                        type="radio" 
-                                        value="vault" 
-                                        checked={tradingMode === 'vault'}
-                                        onChange={(e) => setTradingMode(e.target.value)}
-                                    />
-                                    <span>🏦 Mode Vault (Audit)</span>
-                                </label>
-                            </div>
-                            <small style={{ color: '#6c757d' }}>
-                                {tradingMode === 'approval' ? 
-                                    '🔒 Transfert direct sécurisé (non-custodial)' : 
-                                    '🏦 Dépôt temporaire dans vault (pour démonstration)'
-                                }
-                            </small>
-                        </div>
-
-                        {/* Bouton dépôt vault si mode vault sélectionné */}
-                        {tradingMode === 'vault' && quantity && price && (
-                            <div style={{
-                                backgroundColor: '#fff3cd',
-                                padding: '15px',
-                                borderRadius: '5px',
-                                marginBottom: '15px'
-                            }}>
-                                <h4>🏦 Dépôt Vault Requis</h4>
-                                <p>Token: <strong>{orderType === 'sell' ? symbol : 'TRG'}</strong></p>
-                                <p>Montant: <strong>{orderType === 'sell' ? quantity : (parseFloat(quantity || 0) * parseFloat(price || 0)).toFixed(2)}</strong></p>
-                                <button 
-                                    onClick={handleVaultDeposit}
-                                    style={{
-                                        padding: '10px 20px',
-                                        backgroundColor: '#ffc107',
-                                        color: 'black',
-                                        border: 'none',
-                                        borderRadius: '5px',
-                                        cursor: 'pointer'
-                                    }}
-                                >
-                                    🏦 Déposer dans Vault
-                                </button>
-                            </div>
-                        )}
+                        <h3>📝 Créer un ordre (prix libre)</h3>
                         
                         {needsApproval && (
                             <div style={{
@@ -691,22 +586,22 @@ export default function AssetPage() {
                             {/* Bouton de soumission */}
                             <button 
                                 type="submit"
-                                disabled={creating || (tradingMode === 'approval' && needsApproval)}
+                                disabled={creating || needsApproval}
                                 style={{
                                     width: '100%',
                                     padding: '15px',
-                                    backgroundColor: creating || (tradingMode === 'approval' && needsApproval) ? '#6c757d' : '#007bff',
+                                    backgroundColor: creating || needsApproval ? '#6c757d' : '#007bff',
                                     color: 'white',
                                     border: 'none',
                                     borderRadius: '5px',
-                                    cursor: creating || (tradingMode === 'approval' && needsApproval) ? 'not-allowed' : 'pointer',
+                                    cursor: creating || needsApproval ? 'not-allowed' : 'pointer',
                                     fontSize: '16px',
                                     fontWeight: 'bold'
                                 }}
                             >
                                 {creating ? '⏳ Création...' : 
-                                 tradingMode === 'approval' && needsApproval ? '🔒 Approbation requise' :
-                                 `${orderType === 'buy' ? '💰 Acheter' : '💸 Vendre'} ${symbol} (${tradingMode === 'approval' ? 'Direct' : 'Vault'})`}
+                                 needsApproval ? '🔒 Approbation requise' :
+                                 `${orderType === 'buy' ? '💰 Acheter' : '💸 Vendre'} ${symbol}`}
                             </button>
                         </form>
 
