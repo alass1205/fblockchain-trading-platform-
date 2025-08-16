@@ -1,37 +1,37 @@
-import { useRouter } from 'next/router';
 import { useState, useEffect } from 'react';
-import { ethers } from 'ethers';
-import Link from 'next/link';
+import { useRouter } from 'next/router';
+import { useWebSocket } from '../hooks/useWebSocket';
 
-export default function Home() {
+export default function ModernTradingHomeWebSocket() {
     const router = useRouter();
     const [account, setAccount] = useState('');
     const [isConnected, setIsConnected] = useState(false);
     const [userRegistered, setUserRegistered] = useState(false);
     const [showRegistration, setShowRegistration] = useState(false);
-    const [balances, setBalances] = useState({});
     const [formData, setFormData] = useState({
         legalName: '',
         passportFile: null
     });
+    const [isDarkMode, setIsDarkMode] = useState(true);
+    const [isLoading, setIsLoading] = useState(false);
+    const [showWalletOptions, setShowWalletOptions] = useState(false);
+
+    // 🔥 WEBSOCKET: Remplace les auto-refresh !
+    const { 
+        socket, 
+        isConnected: wsConnected, 
+        balances, 
+        vaultBalances, 
+        orders, 
+        trades 
+    } = useWebSocket(account);
 
     useEffect(() => {
         checkWalletConnection();
     }, []);
 
-    // Rafraîchissement automatique des balances toutes les 10 secondes
-    useEffect(() => {
-        const interval = setInterval(() => {
-            if (account && userRegistered) {
-                loadBalances(account);
-            }
-        }, 10000);
-
-        return () => clearInterval(interval);
-    }, [account, userRegistered]);
-
     async function checkWalletConnection() {
-        if (typeof window.ethereum !== 'undefined') {
+        if (typeof window !== 'undefined' && window.ethereum) {
             try {
                 const accounts = await window.ethereum.request({ method: 'eth_accounts' });
                 if (accounts.length > 0) {
@@ -46,11 +46,12 @@ export default function Home() {
     }
 
     async function connectWallet() {
-        if (typeof window.ethereum === 'undefined') {
+        if (typeof window === 'undefined' || !window.ethereum) {
             alert('MetaMask non installé!');
             return;
         }
 
+        setIsLoading(true);
         try {
             const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
             setAccount(accounts[0]);
@@ -60,6 +61,7 @@ export default function Home() {
             console.error('Erreur connexion:', error);
             alert('Erreur lors de la connexion');
         }
+        setIsLoading(false);
     }
 
     function forceReconnect() {
@@ -71,8 +73,7 @@ export default function Home() {
         setIsConnected(false);
         setUserRegistered(false);
         setShowRegistration(false);
-        setBalances({});
-        alert('Déconnecté! Changez de compte dans MetaMask puis rechargez.');
+        setShowWalletOptions(false);
     }
 
     async function checkUserRegistration(address) {
@@ -80,18 +81,12 @@ export default function Home() {
             const response = await fetch(`http://localhost:3001/api/check-registration/${address}`);
             const data = await response.json();
             
-            console.log("🔍 Vérification inscription:", data);
-            
             if (data.success && data.registered) {
                 setUserRegistered(true);
                 setShowRegistration(false);
-                console.log("✅ Utilisateur déjà inscrit:", data.user.legal_name);
-                // Charger les balances après confirmation d'inscription
-                await loadBalances(address);
             } else {
                 setUserRegistered(false);
                 setShowRegistration(true);
-                console.log("ℹ️ Utilisateur non inscrit");
             }
         } catch (error) {
             console.error("Erreur vérification inscription:", error);
@@ -99,23 +94,9 @@ export default function Home() {
         }
     }
 
-    async function loadBalances(address) {
-        try {
-            console.log("📊 Chargement balances pour:", address);
-            const response = await fetch(`http://localhost:3001/api/balances/${address}`);
-            const data = await response.json();
-            
-            if (data.success) {
-                setBalances(data.balances);
-                console.log("✅ Balances chargées:", data.balances);
-            }
-        } catch (error) {
-            console.error("Erreur chargement balances:", error);
-        }
-    }
-
     async function handleRegistration(e) {
         e.preventDefault();
+        setIsLoading(true);
         
         const formDataToSend = new FormData();
         formDataToSend.append('walletAddress', account);
@@ -134,9 +115,6 @@ export default function Home() {
             if (result.success) {
                 setUserRegistered(true);
                 setShowRegistration(false);
-                alert('Inscription réussie!');
-                // Charger les balances après inscription
-                await loadBalances(account);
             } else {
                 alert('Erreur inscription');
             }
@@ -144,272 +122,364 @@ export default function Home() {
             console.error('Erreur inscription:', error);
             alert('Erreur inscription');
         }
+        setIsLoading(false);
     }
 
-    // Fonction pour déterminer le nom de l'utilisateur
     const getUserName = (address) => {
         if (address === '0x70997970c51812dc3a010c7d01b50e0d17dc79c8') return 'Aya';
         if (address === '0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc') return 'Beatriz';
-        return 'Utilisateur';
+        return 'Trader';
+    };
+
+    const formatAddress = (addr) => {
+        if (!addr) return '';
+        return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
     };
 
     return (
-        <div style={{ 
+        <div style={{
             minHeight: '100vh',
-            fontFamily: 'Arial, sans-serif',
-            backgroundColor: '#f5f5f5'
+            background: isDarkMode 
+                ? 'linear-gradient(135deg, #0c0c1d 0%, #1a1a3e 50%, #2d1b69 100%)'
+                : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            color: '#ffffff',
+            fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+            position: 'relative',
+            overflow: 'hidden'
         }}>
-            <header style={{
-                backgroundColor: '#fff',
-                padding: '20px',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                marginBottom: '20px'
-            }}>
-                <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-                    <h1 style={{ margin: '0 0 10px 0', color: '#333' }}>
-                        🏛️ Blockchain Trading Platform
-                    </h1>
-                    <p style={{ margin: '0 0 20px 0', color: '#666' }}>
-                        Plateforme de trading d'instruments financiers
-                    </p>
-
-                    {isConnected ? (
-                        <div style={{ 
-                            padding: '10px 15px',
-                            backgroundColor: '#d4edda',
-                            border: '1px solid #c3e6cb',
-                            borderRadius: '5px',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center'
-                        }}>
-                            <span>
-                                🟢 {account.slice(0, 6)}...{account.slice(-4)}
-                            </span>
+            {/* Main Content */}
+            <div style={{ position: 'relative', zIndex: 1 }}>
+                {/* Modern Header */}
+                <header style={{
+                    background: 'rgba(255, 255, 255, 0.1)',
+                    backdropFilter: 'blur(20px)',
+                    borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+                    padding: '20px 0'
+                }}>
+                    <div style={{
+                        maxWidth: '1400px',
+                        margin: '0 auto',
+                        padding: '0 20px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                    }}>
+                        {/* Logo */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                            <div style={{
+                                width: '50px',
+                                height: '50px',
+                                background: 'linear-gradient(45deg, #00d4ff, #ff0080)',
+                                borderRadius: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '24px'
+                            }}>
+                                🏛️
+                            </div>
                             <div>
-                                <button 
-                                    onClick={forceReconnect}
+                                <h1 style={{ 
+                                    margin: 0, 
+                                    fontSize: '24px', 
+                                    background: 'linear-gradient(45deg, #00d4ff, #00ff88)',
+                                    WebkitBackgroundClip: 'text',
+                                    WebkitTextFillColor: 'transparent',
+                                    fontWeight: '700'
+                                }}>
+                                    QuantumTrade
+                                </h1>
+                                <p style={{ margin: 0, fontSize: '14px', color: 'rgba(255,255,255,0.7)' }}>
+                                    Real-Time WebSocket Platform
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* WebSocket Status + Wallet Section */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                            {/* 🔥 NOUVEAU: Indicateur WebSocket */}
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px',
+                                padding: '8px 12px',
+                                background: wsConnected ? 'rgba(0, 255, 136, 0.2)' : 'rgba(255, 107, 107, 0.2)',
+                                border: `1px solid ${wsConnected ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 107, 107, 0.3)'}`,
+                                borderRadius: '10px',
+                                fontSize: '12px'
+                            }}>
+                                <div style={{
+                                    width: '8px',
+                                    height: '8px',
+                                    borderRadius: '50%',
+                                    background: wsConnected ? '#00ff88' : '#ff6b6b'
+                                }}></div>
+                                {wsConnected ? 'Live' : 'Offline'}
+                            </div>
+
+                            {!isConnected ? (
+                                <button
+                                    onClick={connectWallet}
+                                    disabled={isLoading}
                                     style={{
-                                        padding: '8px 16px',
-                                        backgroundColor: '#6c757d',
-                                        color: 'white',
+                                        background: 'linear-gradient(45deg, #00d4ff, #00ff88)',
                                         border: 'none',
-                                        borderRadius: '5px',
-                                        cursor: 'pointer',
-                                        marginRight: '10px'
+                                        borderRadius: '15px',
+                                        padding: '12px 24px',
+                                        color: '#000',
+                                        fontWeight: '600',
+                                        cursor: isLoading ? 'not-allowed' : 'pointer',
+                                        transition: 'all 0.3s ease',
+                                        fontSize: '16px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
                                     }}
                                 >
-                                    Recharger
+                                    {isLoading ? '⏳' : '🦊'} 
+                                    {isLoading ? 'Connecting...' : 'Connect Wallet'}
                                 </button>
-                                <button 
-                                    onClick={disconnectWallet}
+                            ) : (
+                                <button
                                     style={{
-                                        padding: '8px 16px',
-                                        backgroundColor: '#dc3545',
-                                        color: 'white',
-                                        border: 'none',
-                                        borderRadius: '5px',
+                                        background: 'rgba(0, 212, 255, 0.2)',
+                                        border: '1px solid rgba(0, 212, 255, 0.3)',
+                                        borderRadius: '15px',
+                                        padding: '12px 20px',
+                                        color: '#00d4ff',
+                                        fontWeight: '600',
                                         cursor: 'pointer'
                                     }}
                                 >
-                                    Déconnecter
+                                    🟢 {formatAddress(account)}
                                 </button>
-                            </div>
+                            )}
                         </div>
-                    ) : (
-                        <button 
-                            onClick={connectWallet}
-                            style={{
-                                padding: '10px 20px',
-                                backgroundColor: '#007bff',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '5px',
-                                cursor: 'pointer'
-                            }}
-                        >
-                            🦊 Connecter MetaMask
-                        </button>
-                    )}
-                </div>
-            </header>
-
-            <main style={{ maxWidth: '1200px', margin: '0 auto', padding: '0 20px' }}>
-                {!isConnected ? (
-                    <div style={{ textAlign: 'center', padding: '40px' }}>
-                        <h2>Bienvenue sur la plateforme de trading</h2>
-                        <p>Connectez votre wallet MetaMask pour commencer</p>
                     </div>
-                ) : !userRegistered ? (
-                    showRegistration ? (
-                        <div style={{ maxWidth: '500px', margin: '0 auto' }}>
-                            <h2>Inscription</h2>
-                            <form onSubmit={handleRegistration}>
-                                <div style={{ marginBottom: '20px' }}>
-                                    <label>Nom légal :</label>
+                </header>
+
+                {/* Main Content */}
+                <main style={{ maxWidth: '1400px', margin: '0 auto', padding: '40px 20px' }}>
+                    {!isConnected ? (
+                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+                            <h2 style={{ 
+                                fontSize: '48px', 
+                                margin: '0 0 20px 0',
+                                background: 'linear-gradient(45deg, #00d4ff, #00ff88)',
+                                WebkitBackgroundClip: 'text',
+                                WebkitTextFillColor: 'transparent',
+                                fontWeight: '800'
+                            }}>
+                                Welcome to WebSocket Trading
+                            </h2>
+                            <p style={{ 
+                                fontSize: '20px', 
+                                color: 'rgba(255,255,255,0.8)'
+                            }}>
+                                Connect your wallet to start real-time trading
+                            </p>
+                        </div>
+                    ) : !userRegistered ? (
+                        showRegistration ? (
+                            <div style={{ textAlign: 'center' }}>
+                                <h2>Complete Registration</h2>
+                                <form onSubmit={handleRegistration}>
                                     <input
                                         type="text"
                                         value={formData.legalName}
                                         onChange={(e) => setFormData({...formData, legalName: e.target.value})}
+                                        placeholder="Legal Name"
                                         required
-                                        style={{ 
-                                            width: '100%', 
-                                            padding: '10px', 
-                                            borderRadius: '5px',
-                                            border: '1px solid #ddd',
-                                            marginTop: '5px'
+                                        style={{
+                                            padding: '15px',
+                                            margin: '10px',
+                                            borderRadius: '12px',
+                                            border: '1px solid rgba(255, 255, 255, 0.3)',
+                                            background: 'rgba(255, 255, 255, 0.1)',
+                                            color: '#ffffff'
                                         }}
                                     />
-                                </div>
-                                <div style={{ marginBottom: '20px' }}>
-                                    <label>Photo passeport :</label>
                                     <input
                                         type="file"
                                         accept="image/*"
                                         onChange={(e) => setFormData({...formData, passportFile: e.target.files[0]})}
-                                        style={{ 
-                                            width: '100%', 
-                                            padding: '10px', 
-                                            borderRadius: '5px',
-                                            border: '1px solid #ddd',
-                                            marginTop: '5px'
+                                        style={{
+                                            padding: '15px',
+                                            margin: '10px',
+                                            borderRadius: '12px',
+                                            border: '1px solid rgba(255, 255, 255, 0.3)',
+                                            background: 'rgba(255, 255, 255, 0.1)',
+                                            color: '#ffffff'
                                         }}
                                     />
-                                </div>
-                                <button type="submit" style={{
-                                    width: '100%',
-                                    padding: '15px',
-                                    backgroundColor: '#28a745',
-                                    color: 'white',
-                                    border: 'none',
-                                    borderRadius: '5px',
-                                    cursor: 'pointer'
-                                }}>
-                                    S'inscrire
-                                </button>
-                            </form>
-                        </div>
+                                    <button 
+                                        type="submit"
+                                        disabled={isLoading}
+                                        style={{
+                                            padding: '15px 30px',
+                                            background: 'linear-gradient(45deg, #00d4ff, #00ff88)',
+                                            border: 'none',
+                                            borderRadius: '12px',
+                                            color: '#000',
+                                            fontWeight: '600',
+                                            cursor: 'pointer',
+                                            margin: '10px'
+                                        }}
+                                    >
+                                        {isLoading ? 'Registering...' : 'Register'}
+                                    </button>
+                                </form>
+                            </div>
+                        ) : (
+                            <div style={{ textAlign: 'center' }}>
+                                <h2>Verifying Registration...</h2>
+                            </div>
+                        )
                     ) : (
-                        <div style={{ textAlign: 'center', padding: '40px' }}>
-                            <h2>Vérification de l'inscription...</h2>
-                        </div>
-                    )
-                ) : (
-                    <div>
-                        <div style={{
-                            backgroundColor: '#d1ecf1',
-                            padding: '15px',
-                            borderRadius: '10px',
-                            marginBottom: '30px',
-                            textAlign: 'center'
-                        }}>
-                            <h2>**✅ Connecté: {account}**</h2>
-                            <p>🎯 Compte de {getUserName(account)} - Balances RÉELLES:</p>
-                            <p style={{ fontSize: '18px', fontWeight: 'bold' }}>
-                                💰 {balances.TRG || 0} TRG | 
-                                📈 {balances.CLV || 0} CLV | 
-                                🌿 {balances.ROO || 0} ROO | 
-                                🏛️ {balances.GOV || 0} GOV
-                            </p>
-                            <small style={{ color: '#666' }}>Mise à jour automatique toutes les 10s</small>
-                        </div>
-
-                        <div style={{
-                            display: 'grid',
-                            gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-                            gap: '20px'
-                        }}>
+                        <div>
+                            {/* User Dashboard */}
                             <div style={{
-                                backgroundColor: '#fff',
-                                padding: '20px',
-                                borderRadius: '10px',
-                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                                background: 'rgba(0, 212, 255, 0.1)',
+                                backdropFilter: 'blur(20px)',
+                                borderRadius: '20px',
+                                padding: '30px',
+                                marginBottom: '40px',
+                                textAlign: 'center'
                             }}>
-                                <h3>Navigation</h3>
-                                <ul style={{ listStyle: 'none', padding: 0 }}>
-                                    <li style={{ marginBottom: '10px' }}>
-                                        <Link href="/portfolio" style={{ color: '#007bff', textDecoration: 'none' }}>
-                                            📊 Portfolio
-                                        </Link>
-                                    </li>
-                                    <li style={{ marginBottom: '10px' }}>
-                                        <button 
-                                            onClick={() => router.push("/trades")} 
-                                            style={{
-                                                color: "#007bff", 
-                                                background: "none", 
-                                                border: "none", 
-                                                textDecoration: "underline", 
-                                                cursor: "pointer",
-                                                fontSize: "16px"
-                                            }}
-                                        >
-                                            📊 Historique Trades
-                                        </button>
-                                    </li>
-                                </ul>
-                                <p style={{ color: '#666', fontSize: '14px' }}>Vos actifs et retraits</p>
+                                <h2 style={{ 
+                                    margin: '0 0 15px 0',
+                                    fontSize: '28px',
+                                    background: 'linear-gradient(45deg, #00d4ff, #00ff88)',
+                                    WebkitBackgroundClip: 'text',
+                                    WebkitTextFillColor: 'transparent',
+                                    fontWeight: '700'
+                                }}>
+                                    Welcome, {getUserName(account)}! 🎯
+                                </h2>
+                                
+                                {/* 🔥 NOUVEAU: Statut WebSocket */}
+                                <div style={{
+                                    background: wsConnected ? 'rgba(0, 255, 136, 0.2)' : 'rgba(255, 107, 107, 0.2)',
+                                    border: `1px solid ${wsConnected ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 107, 107, 0.3)'}`,
+                                    borderRadius: '10px',
+                                    padding: '10px',
+                                    marginBottom: '20px',
+                                    fontSize: '14px'
+                                }}>
+                                    {wsConnected ? '🔥 Live WebSocket Connection' : '❌ WebSocket Disconnected'}
+                                </div>
+                                
+                                {/* Balance Display - 🔥 WEBSOCKET DATA */}
+                                <div style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+                                    gap: '20px',
+                                    marginTop: '25px'
+                                }}>
+                                    <div style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        textAlign: 'center'
+                                    }}>
+                                        <div style={{ fontSize: '24px', marginBottom: '8px' }}>💰</div>
+                                        <div style={{ fontSize: '20px', fontWeight: '700', color: '#00ff88' }}>
+                                            {balances.TRG || 0}
+                                        </div>
+                                        <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)' }}>TRG</div>
+                                    </div>
+                                    <div style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        textAlign: 'center'
+                                    }}>
+                                        <div style={{ fontSize: '24px', marginBottom: '8px' }}>📈</div>
+                                        <div style={{ fontSize: '20px', fontWeight: '700', color: '#00d4ff' }}>
+                                            {balances.CLV || 0}
+                                        </div>
+                                        <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)' }}>CLV</div>
+                                    </div>
+                                    <div style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        textAlign: 'center'
+                                    }}>
+                                        <div style={{ fontSize: '24px', marginBottom: '8px' }}>🌿</div>
+                                        <div style={{ fontSize: '20px', fontWeight: '700', color: '#ff6b6b' }}>
+                                            {balances.ROO || 0}
+                                        </div>
+                                        <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)' }}>ROO</div>
+                                    </div>
+                                    <div style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        textAlign: 'center'
+                                    }}>
+                                        <div style={{ fontSize: '24px', marginBottom: '8px' }}>🏛️</div>
+                                        <div style={{ fontSize: '20px', fontWeight: '700', color: '#ffa502' }}>
+                                            {balances.GOV || 0}
+                                        </div>
+                                        <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)' }}>GOV</div>
+                                    </div>
+                                </div>
+                                <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.6)', marginTop: '15px' }}>
+                                    🔥 Real-time WebSocket updates
+                                </p>
                             </div>
 
-                            <Link href="/assets/CLV" style={{ textDecoration: 'none' }}>
-                                <div style={{
-                                    backgroundColor: '#fff',
-                                    padding: '20px',
-                                    borderRadius: '10px',
-                                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                                    cursor: 'pointer',
-                                    transition: 'transform 0.2s'
-                                }}>
-                                    <h3>🏢 Actions CLV</h3>
-                                    <p>Clove Company</p>
-                                    <small>Vous avez: {balances.CLV || 0} CLV</small>
-                                </div>
-                            </Link>
-
-                            <Link href="/assets/ROO" style={{ textDecoration: 'none' }}>
-                                <div style={{
-                                    backgroundColor: '#fff',
-                                    padding: '20px',
-                                    borderRadius: '10px',
-                                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                                    cursor: 'pointer'
-                                }}>
-                                    <h3>🌿 Actions ROO</h3>
-                                    <p>Rooibos Limited</p>
-                                    <small>Vous avez: {balances.ROO || 0} ROO</small>
-                                </div>
-                            </Link>
-
-                            <Link href="/assets/GOV" style={{ textDecoration: 'none' }}>
-                                <div style={{
-                                    backgroundColor: '#fff',
-                                    padding: '20px',
-                                    borderRadius: '10px',
-                                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                                    cursor: 'pointer'
-                                }}>
-                                    <h3>🏛️ Obligations GOV</h3>
-                                    <p>Obligations gouvernementales</p>
-                                    <small>Vous avez: {balances.GOV || 0} GOV</small>
-                                </div>
-                            </Link>
-
-                            <Link href="/faq" style={{ textDecoration: 'none' }}>
-                                <div style={{
-                                    backgroundColor: '#fff',
-                                    padding: '20px',
-                                    borderRadius: '10px',
-                                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                                    cursor: 'pointer'
-                                }}>
-                                    <h3>❓ FAQ</h3>
-                                    <p>Guide d'utilisation</p>
-                                </div>
-                            </Link>
+                            {/* Quick Navigation */}
+                            <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                                gap: '20px'
+                            }}>
+                                <button
+                                    onClick={() => router.push('/portfolio')}
+                                    style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        border: '1px solid rgba(255, 255, 255, 0.2)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        color: '#ffffff',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    📊 Portfolio
+                                </button>
+                                <button
+                                    onClick={() => router.push('/trades')}
+                                    style={{
+                                        background: 'rgba(255, 255, 255, 0.1)',
+                                        border: '1px solid rgba(255, 255, 255, 0.2)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        color: '#ffffff',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    📈 Trade History
+                                </button>
+                                <button
+                                    onClick={() => router.push('/assets/CLV')}
+                                    style={{
+                                        background: 'rgba(0, 212, 255, 0.2)',
+                                        border: '1px solid rgba(0, 212, 255, 0.3)',
+                                        borderRadius: '15px',
+                                        padding: '20px',
+                                        color: '#00d4ff',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    🏢 Trade CLV
+                                </button>
+                            </div>
                         </div>
-                    </div>
-                )}
-            </main>
+                    )}
+                </main>
+            </div>
         </div>
     );
 }
