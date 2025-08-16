@@ -9,6 +9,7 @@ export default function AssetPage() {
     const [account, setAccount] = useState('');
     const [asset, setAsset] = useState(null);
     const [balances, setBalances] = useState({});
+    const [vaultBalances, setVaultBalances] = useState({});
     const [orders, setOrders] = useState({ buyOrders: [], sellOrders: [] });
     const [priceHistory, setPriceHistory] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -28,7 +29,8 @@ export default function AssetPage() {
         TRG: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
         CLV: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512", 
         ROO: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-        VAULT: "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
+        GOV: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+        TradingVault: "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9"
     };
 
     useEffect(() => {
@@ -43,6 +45,7 @@ export default function AssetPage() {
             if (account && symbol) {
                 loadOrderBook();
                 loadBalances(account);
+                loadVaultBalances(account);
             }
         }, 2000);
 
@@ -57,6 +60,7 @@ export default function AssetPage() {
                     setAccount(accounts[0]);
                     await loadAssetData();
                     await loadBalances(accounts[0]);
+                    await loadVaultBalances(accounts[0]);
                     await loadOrderBook();
                 } else {
                     router.push('/');
@@ -103,6 +107,20 @@ export default function AssetPage() {
         }
     };
 
+    const loadVaultBalances = async (userAddress) => {
+        try {
+            const response = await fetch(`http://localhost:3001/api/vault-balances/${userAddress}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.success) {
+                    setVaultBalances(data.balances || {});
+                }
+            }
+        } catch (error) {
+            console.error('Erreur vault balances:', error);
+        }
+    };
+
     // 🔧 CORRECTION DE LA LECTURE DES ORDRES
     const loadOrderBook = async () => {
         try {
@@ -139,7 +157,8 @@ export default function AssetPage() {
             return false;
         }
     };
-    // 🏦 Fonction pour dépôt vault (MODE HYBRIDE)
+
+    // 🏦 Fonction pour dépôt vault (MODE HYBRIDE) - CORRIGÉE
     const handleVaultDeposit = async () => {
         if (!window.ethereum) return;
         
@@ -151,32 +170,37 @@ export default function AssetPage() {
             const amountNeeded = orderType === 'sell' ? quantity : (parseFloat(quantity) * parseFloat(price));
             
             const tokenContract = new ethers.Contract(CONTRACT_ADDRESSES[tokenNeeded], 
-                ["function approve(address,uint256) returns(bool)", "function transfer(address,uint256) returns(bool)"], signer);
-            const vaultContract = new ethers.Contract(CONTRACT_ADDRESSES.VAULT,
+                ["function approve(address,uint256) returns(bool)"], signer);
+            const vaultContract = new ethers.Contract(CONTRACT_ADDRESSES.TradingVault,
                 ["function deposit(address,uint256)"], signer);
             
             const amountWei = ethers.utils.parseEther(amountNeeded.toString());
             
             console.log('🏦 Dépôt vault mode...', {tokenNeeded, amountNeeded});
             
-            // Approuver puis déposer
-            const approveTx = await tokenContract.approve(CONTRACT_ADDRESSES.VAULT, amountWei);
+            // ÉTAPE 1: Approuver le vault pour le token
+            console.log('📋 Approbation du token pour le vault...');
+            const approveTx = await tokenContract.approve(CONTRACT_ADDRESSES.TradingVault, amountWei);
             await approveTx.wait();
+            console.log('✅ Approbation confirmée');
             
+            // ÉTAPE 2: Déposer dans le vault
+            console.log('📋 Dépôt dans le vault...');
             const depositTx = await vaultContract.deposit(CONTRACT_ADDRESSES[tokenNeeded], amountWei);
             await depositTx.wait();
+            console.log('✅ Dépôt confirmé');
             
             alert('✅ Dépôt vault réussi ! Créez maintenant votre ordre.');
             
             // Recharger les balances
             await loadBalances(account);
+            await loadVaultBalances(account);
             
         } catch (error) {
             console.error('Erreur dépôt vault:', error);
             alert('Erreur lors du dépôt vault: ' + error.message);
         }
     };
-
 
     // 🔧 FONCTION D'APPROBATION CORRIGÉE
     const requestApproval = async () => {
@@ -190,68 +214,22 @@ export default function AssetPage() {
             
             console.log('🔓 Demande d\'approbation:', { tokenNeeded, amountNeeded });
             
-            // Convertir le montant en Wei (format BigNumber)
-            const amountWei = (parseFloat(amountNeeded) * Math.pow(10, 18)).toString();
-            const amountHex = '0x' + BigInt(amountWei).toString(16);
+            const provider = new ethers.providers.Web3Provider(window.ethereum);
+            const signer = provider.getSigner();
             
-            // Adresse du token à approuver
-            const tokenAddress = CONTRACT_ADDRESSES[tokenNeeded];
-            const spenderAddress = CONTRACT_ADDRESSES.VAULT;
+            const tokenContract = new ethers.Contract(CONTRACT_ADDRESSES[tokenNeeded], 
+                ["function approve(address,uint256) returns(bool)"], signer);
             
-            // Construire les données de la transaction ERC20.approve(spender, amount)
-            const functionSignature = '0x095ea7b3'; // approve(address,uint256)
-            const spenderPadded = spenderAddress.slice(2).padStart(64, '0');
-            const amountPadded = amountHex.slice(2).padStart(64, '0');
+            const amountWei = ethers.utils.parseEther(amountNeeded.toString());
             
-            const txData = functionSignature + spenderPadded + amountPadded;
+            console.log('📋 Envoi de l\'approbation...');
+            const approveTx = await tokenContract.approve(CONTRACT_ADDRESSES.TradingVault, amountWei);
+            await approveTx.wait();
             
-            console.log('📋 Transaction d\'approbation:', {
-                to: tokenAddress,
-                data: txData,
-                amountWei: amountWei,
-                amountHex: amountHex
-            });
-
-            const txParams = {
-                to: tokenAddress,
-                from: account,
-                data: txData,
-                gas: '0x15f90', // 90000 gas
-            };
-
-            const txHash = await window.ethereum.request({
-                method: 'eth_sendTransaction',
-                params: [txParams],
-            });
-
-            console.log('✅ Approbation envoyée:', txHash);
-            alert('Approbation envoyée ! Attendez la confirmation...');
-            
-            // Attendre la confirmation (polling)
-            let attempts = 0;
-            const maxAttempts = 10;
-            
-            const checkConfirmation = async () => {
-                attempts++;
-                console.log(`🔍 Vérification approbation... (${attempts}/${maxAttempts})`);
-                
-                const hasApproval = await checkApproval();
-                if (hasApproval) {
-                    setNeedsApproval(false);
-                    setApproving(false);
-                    alert('✅ Approbation confirmée ! Vous pouvez maintenant créer l\'ordre.');
-                    return;
-                }
-                
-                if (attempts < maxAttempts) {
-                    setTimeout(checkConfirmation, 2000);
-                } else {
-                    setApproving(false);
-                    alert('⏱️ Délai d\'attente dépassé. Vérifiez votre transaction et réessayez.');
-                }
-            };
-            
-            setTimeout(checkConfirmation, 3000);
+            console.log('✅ Approbation confirmée');
+            setNeedsApproval(false);
+            setApproving(false);
+            alert('✅ Approbation confirmée ! Vous pouvez maintenant créer l\'ordre.');
 
         } catch (error) {
             console.error('Erreur approbation:', error);
@@ -279,7 +257,7 @@ export default function AssetPage() {
             let endpoint;
             
             if (tradingMode === 'approval') {
-                // Mode approbation (actuel)
+                // Mode approbation - vérifier l'approbation d'abord
                 const hasApproval = await checkApproval();
                 if (!hasApproval) {
                     setNeedsApproval(true);
@@ -289,7 +267,7 @@ export default function AssetPage() {
                 }
                 endpoint = '/api/create-order-with-approval';
             } else {
-                // Mode vault - ordre simple
+                // Mode vault - ordre simple (pas besoin de vérification d'approbation)
                 endpoint = '/api/orders';
             }
 
@@ -313,6 +291,7 @@ export default function AssetPage() {
                 setNeedsApproval(false);
                 
                 await loadBalances(account);
+                await loadVaultBalances(account);
                 await loadOrderBook();
             } else {
                 alert(`❌ Erreur: ${data.error}`);
@@ -383,7 +362,7 @@ export default function AssetPage() {
 
             {/* Titre */}
             <div style={{ textAlign: 'center', marginBottom: '30px' }}>
-                <h1>📈 Trading {symbol} - MATCHING CORRIGÉ ✅</h1>
+                <h1>📈 Trading {symbol} - MODE HYBRIDE ✅</h1>
                 {asset && (
                     <p style={{ fontSize: '18px', color: '#6b7280' }}>
                         {asset.name} • Prix suggéré: {asset.currentPrice} TRG
@@ -417,6 +396,7 @@ export default function AssetPage() {
                                         <br />
                                         <small>{order.user_address.slice(0,8)}... 
                                         {order.user_address.toLowerCase() === account.toLowerCase() && ' (Vous)'}
+                                        {order.mode && ` [${order.mode}]`}
                                         </small>
                                     </div>
                                 ))
@@ -451,6 +431,7 @@ export default function AssetPage() {
                                         <br />
                                         <small>{order.user_address.slice(0,8)}...
                                         {order.user_address.toLowerCase() === account.toLowerCase() && ' (Vous)'}
+                                        {order.mode && ` [${order.mode}]`}
                                         </small>
                                     </div>
                                 ))
@@ -472,7 +453,7 @@ export default function AssetPage() {
 
                 {/* Panneau de trading (droite) */}
                 <div>
-                    <h2>💼 Trading avec Approbations CORRIGÉ</h2>
+                    <h2>💼 Trading Mode Hybride</h2>
                     
                     {/* Mes balances */}
                     <div style={{ 
@@ -482,8 +463,18 @@ export default function AssetPage() {
                         marginBottom: '20px'
                     }}>
                         <h3>💰 Mes balances</h3>
-                        <p><strong>TRG:</strong> {balances.TRG || 0}</p>
-                        <p><strong>{symbol}:</strong> {balances[symbol] || 0}</p>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+                            <div>
+                                <h4>🏦 Wallet</h4>
+                                <p><strong>TRG:</strong> {balances.TRG || 0}</p>
+                                <p><strong>{symbol}:</strong> {balances[symbol] || 0}</p>
+                            </div>
+                            <div>
+                                <h4>🏛️ Vault</h4>
+                                <p><strong>TRG:</strong> {vaultBalances.TRG || 0}</p>
+                                <p><strong>{symbol}:</strong> {vaultBalances[symbol] || 0}</p>
+                            </div>
+                        </div>
                     </div>
 
                     {/* Formulaire de création d'ordre */}
@@ -558,7 +549,7 @@ export default function AssetPage() {
                             </div>
                         )}
                         
-                        {needsApproval && (
+                        {needsApproval && tradingMode === 'approval' && (
                             <div style={{
                                 backgroundColor: '#fff3cd',
                                 border: '1px solid #ffeaa7',
@@ -661,8 +652,8 @@ export default function AssetPage() {
                                 </small>
                             </div>
 
-                            {/* Bouton de vérification d'approbation */}
-                            {quantity && price && !needsApproval && (
+                            {/* Bouton de vérification d'approbation (seulement en mode approbation) */}
+                            {quantity && price && !needsApproval && tradingMode === 'approval' && (
                                 <button 
                                     type="button"
                                     onClick={async () => {
@@ -709,7 +700,6 @@ export default function AssetPage() {
                                  `${orderType === 'buy' ? '💰 Acheter' : '💸 Vendre'} ${symbol} (${tradingMode === 'approval' ? 'Direct' : 'Vault'})`}
                             </button>
                         </form>
-
                         {/* Résumé de l'ordre */}
                         {quantity && price && (
                             <div style={{ 

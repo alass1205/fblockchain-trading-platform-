@@ -425,11 +425,13 @@ async function matchOrders(assetSymbol) {
                             // Déterminer la quantité à échanger (minimum des deux)
                             
                             // NOUVEAU: Déterminer le mode de trade (priorité au mode vault pour compatibilité)
+                            const tradeMode = (buyOrder.mode === 'vault' || sellOrder.mode === 'vault') ? 'vault' : 'approval';
                             
                             console.log('💥 Match trouvé!', {
                                 buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG [${buyOrder.mode}]`,
                                 sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG [${sellOrder.mode}]`,
                                 tradeQuantity: tradeQuantity,
+                                tradeMode: tradeMode,
                                 type: tradeQuantity === buyOrder.quantity && tradeQuantity === sellOrder.quantity ? 'FULL' :
                                       tradeQuantity === buyOrder.quantity ? 'BUY_FILLED' :
                                       tradeQuantity === sellOrder.quantity ? 'SELL_FILLED' : 'PARTIAL'
@@ -437,7 +439,7 @@ async function matchOrders(assetSymbol) {
                             
                             try {
                                 // NOUVEAU: Choisir le bon endpoint selon le mode
-                                const endpoint = tradeMode === 'vault' ? '/api/execute-trade' : '/api/execute-trade';
+                                const endpoint = tradeMode === 'vault' ? '/api/execute-trade' : '/api/execute-trade-approval';
                                 
                                 console.log(`🎯 Utilisation endpoint: ${endpoint} (mode: ${tradeMode})`);
                                 
@@ -604,7 +606,7 @@ app.post("/api/execute-trade", async (req, res) => {
 
 
 // 🔒 NOUVELLE FONCTION POUR MODE APPROBATION
-app.post("/api/execute-trade", async (req, res) => {
+app.post("/api/execute-trade-approval", async (req, res) => {
     const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
     
     try {

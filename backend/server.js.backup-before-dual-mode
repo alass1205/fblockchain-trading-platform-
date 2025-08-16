@@ -422,13 +422,10 @@ async function matchOrders(assetSymbol) {
                             
                             // Déterminer la quantité à échanger (minimum des deux)
                             const tradeQuantity = Math.min(buyOrder.quantity, sellOrder.quantity);
-                            // Déterminer la quantité à échanger (minimum des deux)
-                            
-                            // NOUVEAU: Déterminer le mode de trade (priorité au mode vault pour compatibilité)
                             
                             console.log('💥 Match trouvé!', {
-                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG [${buyOrder.mode}]`,
-                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG [${sellOrder.mode}]`,
+                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG`,
+                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG`,
                                 tradeQuantity: tradeQuantity,
                                 type: tradeQuantity === buyOrder.quantity && tradeQuantity === sellOrder.quantity ? 'FULL' :
                                       tradeQuantity === buyOrder.quantity ? 'BUY_FILLED' :
@@ -436,13 +433,8 @@ async function matchOrders(assetSymbol) {
                             });
                             
                             try {
-                                // NOUVEAU: Choisir le bon endpoint selon le mode
-                                const endpoint = tradeMode === 'vault' ? '/api/execute-trade' : '/api/execute-trade';
-                                
-                                console.log(`🎯 Utilisation endpoint: ${endpoint} (mode: ${tradeMode})`);
-                                
                                 // Exécuter le trade sur la blockchain
-                                const response = await fetch(`http://localhost:3001${endpoint}`, {
+                                const response = await fetch('http://localhost:3001/api/execute-trade', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({
@@ -595,72 +587,6 @@ app.post("/api/execute-trade", async (req, res) => {
         
     } catch (error) {
         console.error("❌ Erreur execution trade:", error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-
-// 🔒 NOUVELLE FONCTION POUR MODE APPROBATION
-app.post("/api/execute-trade", async (req, res) => {
-    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
-    
-    try {
-        console.log("🔗 Exécution trade (mode approbation - transfert direct):", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
-        
-        const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
-        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
-        
-        const addressesPath = path.join(__dirname, "deployed-addresses.json");
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
-        
-        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json"), "utf8")).abi;
-        
-        const quantityWei = ethers.utils.parseEther(quantity.toString());
-        const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
-        
-        console.log("📋 Transferts ERC20 directs [MODE APPROBATION]...");
-        
-        // 1. Transférer l'asset du vendeur vers l'acheteur
-        const assetContract = new ethers.Contract(addresses[assetSymbol], tokenABI, wallet);
-        const transferAssetTx = await assetContract.transferFrom(
-            sellerAddress,
-            buyerAddress,
-            quantityWei
-        );
-        await transferAssetTx.wait();
-        console.log("✅ Asset transféré:", transferAssetTx.hash);
-        
-        // 2. Transférer TRG de l'acheteur vers le vendeur
-        const trgContract = new ethers.Contract(addresses.TRG, tokenABI, wallet);
-        const transferPaymentTx = await trgContract.transferFrom(
-            buyerAddress,
-            sellerAddress,
-            totalPriceWei
-        );
-        await transferPaymentTx.wait();
-        console.log("✅ Paiement transféré:", transferPaymentTx.hash);
-        
-        console.log("✅ Trade approbation exécuté!");
-        
-        res.json({
-            success: true,
-            message: "Trade exécuté en mode approbation (transfert direct)",
-            transactionDetails: {
-                asset: `${quantity} ${assetSymbol}`,
-                payment: `${quantity * price} TRG`,
-                buyer: buyerAddress,
-                seller: sellerAddress,
-                assetTxHash: transferAssetTx.hash,
-                paymentTxHash: transferPaymentTx.hash
-            }
-        });
-        
-    } catch (error) {
-        console.error("❌ Erreur execution trade approbation:", error);
         res.status(500).json({
             success: false,
             error: error.message

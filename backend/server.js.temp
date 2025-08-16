@@ -50,8 +50,7 @@ db.serialize(() => {
         quantity REAL NOT NULL,
         price REAL NOT NULL,
         status TEXT DEFAULT 'pending',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        mode TEXT DEFAULT 'vault'
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS assets (
@@ -290,8 +289,8 @@ app.post('/api/create-order-with-approval', (req, res) => {
         console.log('📝 Création ordre avec approbation (mode sécurisé):', { userAddress, assetSymbol, orderType, quantity, price });
         
         db.run(
-            'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, mode) VALUES (?, ?, ?, ?, ?, ?)',
-            [userAddress, assetSymbol, orderType, quantity, price, 'approval'],
+            'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
+            [userAddress, assetSymbol, orderType, quantity, price],
             function(err) {
                 if (err) {
                     res.status(500).json({ success: false, error: err.message });
@@ -325,8 +324,8 @@ app.post('/api/orders', (req, res) => {
     console.log('📝 Création ordre mode vault (démo):', { userAddress, assetSymbol, orderType, quantity, price });
     
     db.run(
-        'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, mode) VALUES (?, ?, ?, ?, ?, ?)',
-        [userAddress, assetSymbol, orderType, quantity, price, 'vault'],
+        'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
+        [userAddress, assetSymbol, orderType, quantity, price],
         function(err) {
             if (err) {
                 console.error('❌ Erreur création ordre vault:', err);
@@ -422,13 +421,10 @@ async function matchOrders(assetSymbol) {
                             
                             // Déterminer la quantité à échanger (minimum des deux)
                             const tradeQuantity = Math.min(buyOrder.quantity, sellOrder.quantity);
-                            // Déterminer la quantité à échanger (minimum des deux)
-                            
-                            // NOUVEAU: Déterminer le mode de trade (priorité au mode vault pour compatibilité)
                             
                             console.log('💥 Match trouvé!', {
-                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG [${buyOrder.mode}]`,
-                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG [${sellOrder.mode}]`,
+                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG`,
+                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG`,
                                 tradeQuantity: tradeQuantity,
                                 type: tradeQuantity === buyOrder.quantity && tradeQuantity === sellOrder.quantity ? 'FULL' :
                                       tradeQuantity === buyOrder.quantity ? 'BUY_FILLED' :
@@ -436,13 +432,8 @@ async function matchOrders(assetSymbol) {
                             });
                             
                             try {
-                                // NOUVEAU: Choisir le bon endpoint selon le mode
-                                const endpoint = tradeMode === 'vault' ? '/api/execute-trade' : '/api/execute-trade';
-                                
-                                console.log(`🎯 Utilisation endpoint: ${endpoint} (mode: ${tradeMode})`);
-                                
                                 // Exécuter le trade sur la blockchain
-                                const response = await fetch(`http://localhost:3001${endpoint}`, {
+                                const response = await fetch('http://localhost:3001/api/execute-trade', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({
@@ -527,12 +518,12 @@ async function matchOrders(assetSymbol) {
     });
 }
 
-// Route pour exécuter un trade réel sur blockchain (MODE VAULT)
+// Route pour exécuter un trade réel sur blockchain
 app.post("/api/execute-trade", async (req, res) => {
     const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
     
     try {
-        console.log("🔗 Exécution trade (mode vault):", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
+        console.log("🔗 Exécution trade via vault.executeTrade():", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
         
         const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
         const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -547,124 +538,53 @@ app.post("/api/execute-trade", async (req, res) => {
         const quantityWei = ethers.utils.parseEther(quantity.toString());
         const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
         
-        console.log("📋 Appel vault.transferFromVault() [MODE VAULT]...");
+        console.log("📋 Appel vault.executeTrade()...");
         
-        // Transférer asset du vendeur vers acheteur
-        await vaultContract.transferFromVault(
+        const tradeTx = await vaultContract.executeTrade(
             addresses[assetSymbol],
-            sellerAddress,
-            buyerAddress,
-            quantityWei
-        );
-        
-        // Transférer payment de acheteur vers vendeur
-        await vaultContract.transferFromVault(
             addresses.TRG,
-            buyerAddress,
             sellerAddress,
+            buyerAddress,
+            quantityWei,
             totalPriceWei
         );
         
-        console.log("✅ Trade vault exécuté!");
+        await tradeTx.wait();
+        console.log("✅ Trade exécuté via vault.executeTrade()!");
         
-        // Mettre à jour les ordres
+        // Enregistrer le trade dans l'historique
         await new Promise((resolve, reject) => {
-            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
-                ["filled", assetSymbol, "sell", sellerAddress, "pending"],
-                function(err) { if (err) reject(err); else resolve(); }
-            );
-        });
-        
-        await new Promise((resolve, reject) => {
-            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
-                ["filled", assetSymbol, "buy", buyerAddress, "pending"],
-                function(err) { if (err) reject(err); else resolve(); }
+            db.run(
+                `INSERT INTO trades (asset_symbol, buyer_address, seller_address, quantity, price, total_amount, tx_hash) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [assetSymbol, buyerAddress, sellerAddress, quantity, price, quantity * price, tradeTx.hash],
+                function(err) {
+                    if (err) {
+                        console.error('❌ Erreur enregistrement trade:', err);
+                        reject(err);
+                    } else {
+                        console.log('📝 Trade enregistré dans l\'historique - ID:', this.lastID);
+                        resolve();
+                    }
+                }
             );
         });
         
         res.json({
             success: true,
-            message: "Trade exécuté en mode vault",
-            transactionDetails: {
-                asset: `${quantity} ${assetSymbol}`,
-                payment: `${quantity * price} TRG`,
-                buyer: buyerAddress,
-                seller: sellerAddress
-            }
-        });
-        
-    } catch (error) {
-        console.error("❌ Erreur execution trade:", error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-
-// 🔒 NOUVELLE FONCTION POUR MODE APPROBATION
-app.post("/api/execute-trade", async (req, res) => {
-    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
-    
-    try {
-        console.log("🔗 Exécution trade (mode approbation - transfert direct):", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
-        
-        const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
-        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
-        
-        const addressesPath = path.join(__dirname, "deployed-addresses.json");
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
-        
-        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json"), "utf8")).abi;
-        
-        const quantityWei = ethers.utils.parseEther(quantity.toString());
-        const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
-        
-        console.log("📋 Transferts ERC20 directs [MODE APPROBATION]...");
-        
-        // 1. Transférer l'asset du vendeur vers l'acheteur
-        const assetContract = new ethers.Contract(addresses[assetSymbol], tokenABI, wallet);
-        const transferAssetTx = await assetContract.transferFrom(
-            sellerAddress,
-            buyerAddress,
-            quantityWei
-        );
-        await transferAssetTx.wait();
-        console.log("✅ Asset transféré:", transferAssetTx.hash);
-        
-        // 2. Transférer TRG de l'acheteur vers le vendeur
-        const trgContract = new ethers.Contract(addresses.TRG, tokenABI, wallet);
-        const transferPaymentTx = await trgContract.transferFrom(
-            buyerAddress,
-            sellerAddress,
-            totalPriceWei
-        );
-        await transferPaymentTx.wait();
-        console.log("✅ Paiement transféré:", transferPaymentTx.hash);
-        
-        console.log("✅ Trade approbation exécuté!");
-        
-        res.json({
-            success: true,
-            message: "Trade exécuté en mode approbation (transfert direct)",
+            message: "Trade exécuté via vault.executeTrade()",
             transactionDetails: {
                 asset: `${quantity} ${assetSymbol}`,
                 payment: `${quantity * price} TRG`,
                 buyer: buyerAddress,
                 seller: sellerAddress,
-                assetTxHash: transferAssetTx.hash,
-                paymentTxHash: transferPaymentTx.hash
+                txHash: tradeTx.hash
             }
         });
         
     } catch (error) {
-        console.error("❌ Erreur execution trade approbation:", error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error("❌ Erreur vault.executeTrade():", error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
