@@ -80,9 +80,10 @@ export default function ModernTradesPage() {
         });
     };
 
-    const formatAddress = (address) => {
-        return `${address.slice(0, 8)}...${address.slice(-6)}`;
-    };
+const formatAddress = (address) => {
+    if (!address) return "N/A";
+    return `${address.slice(0, 8)}...${address.slice(-6)}`;
+};
 
     const getFilteredTrades = () => {
         let filtered = trades;
