@@ -248,13 +248,81 @@ app.get('/api/vault-balances/:address', async (req, res) => {
     }
 });
 
+// Route pour vérifier les approbations
+app.get('/api/check-allowance/:userAddress/:tokenSymbol/:amount', async (req, res) => {
+    const { userAddress, tokenSymbol, amount } = req.params;
+    
+    try {
+        console.log('🔍 Vérification allowance:', { userAddress, tokenSymbol, amount });
+        
+        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        
+        const tokenABI = [
+            "function allowance(address owner, address spender) view returns (uint256)"
+        ];
+        
+        const tokenContract = new ethers.Contract(addresses[tokenSymbol], tokenABI, provider);
+        const allowance = await tokenContract.allowance(userAddress, addresses.TradingVault);
+        const requiredAmount = ethers.utils.parseUnits(amount.toString(), 18);
+        
+        const hasEnoughAllowance = allowance.gte(requiredAmount);
+        
+        res.json({
+            success: true,
+            hasAllowance: hasEnoughAllowance,
+            currentAllowance: ethers.utils.formatUnits(allowance, 18),
+            requiredAmount: amount
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur vérification allowance:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
+// 🔒 MODE APPROBATION - Création d'ordres avec approbation (recommandé)
+app.post('/api/create-order-with-approval', (req, res) => {
+    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
+    
+    try {
+        console.log('📝 Création ordre avec approbation (mode sécurisé):', { userAddress, assetSymbol, orderType, quantity, price });
+        
+        db.run(
+            'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, mode) VALUES (?, ?, ?, ?, ?, ?)',
+            [userAddress, assetSymbol, orderType, quantity, price, 'approval'],
+            function(err) {
+                if (err) {
+                    res.status(500).json({ success: false, error: err.message });
+                } else {
+                    console.log('✅ Ordre créé avec approbation - ID:', this.lastID);
+                    
+                    setTimeout(() => {
+                        matchOrders(assetSymbol);
+                    }, 1000);
+                    
+                    res.json({ 
+                        success: true, 
+                        orderId: this.lastID,
+                        message: 'Ordre créé avec succès (mode approbation)',
+                        mode: 'approval'
+                    });
+                }
+            }
+        );
+        
+    } catch (error) {
+        console.error('❌ Erreur création ordre:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
-// 🏦 MODE VAULT - Création d'ordres standard
+// 🏦 MODE VAULT - Création d'ordres standard (pour audit/démo)
 app.post('/api/orders', (req, res) => {
     const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
     
-    console.log('📝 Création ordre mode vault:', { userAddress, assetSymbol, orderType, quantity, price });
+    console.log('📝 Création ordre mode vault (démo):', { userAddress, assetSymbol, orderType, quantity, price });
     
     db.run(
         'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, mode) VALUES (?, ?, ?, ?, ?, ?)',
@@ -369,9 +437,7 @@ async function matchOrders(assetSymbol) {
                             
                             try {
                                 // NOUVEAU: Choisir le bon endpoint selon le mode
-                                // Déterminer le mode de trade (priorité au mode vault pour compatibilité)
-                                const tradeMode = "vault";
-                                const endpoint = "/api/execute-trade";
+                                const endpoint = tradeMode === 'vault' ? '/api/execute-trade' : '/api/execute-trade';
                                 
                                 console.log(`🎯 Utilisation endpoint: ${endpoint} (mode: ${tradeMode})`);
                                 
@@ -538,6 +604,69 @@ app.post("/api/execute-trade", async (req, res) => {
 
 
 // 🔒 NOUVELLE FONCTION POUR MODE APPROBATION
+app.post("/api/execute-trade", async (req, res) => {
+    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
+    
+    try {
+        console.log("🔗 Exécution trade (mode approbation - transfert direct):", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
+        
+        const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
+        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        
+        const addressesPath = path.join(__dirname, "deployed-addresses.json");
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
+        
+        const tokenABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/StableCoin.sol/StableCoin.json"), "utf8")).abi;
+        
+        const quantityWei = ethers.utils.parseEther(quantity.toString());
+        const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
+        
+        console.log("📋 Transferts ERC20 directs [MODE APPROBATION]...");
+        
+        // 1. Transférer l'asset du vendeur vers l'acheteur
+        const assetContract = new ethers.Contract(addresses[assetSymbol], tokenABI, wallet);
+        const transferAssetTx = await assetContract.transferFrom(
+            sellerAddress,
+            buyerAddress,
+            quantityWei
+        );
+        await transferAssetTx.wait();
+        console.log("✅ Asset transféré:", transferAssetTx.hash);
+        
+        // 2. Transférer TRG de l'acheteur vers le vendeur
+        const trgContract = new ethers.Contract(addresses.TRG, tokenABI, wallet);
+        const transferPaymentTx = await trgContract.transferFrom(
+            buyerAddress,
+            sellerAddress,
+            totalPriceWei
+        );
+        await transferPaymentTx.wait();
+        console.log("✅ Paiement transféré:", transferPaymentTx.hash);
+        
+        console.log("✅ Trade approbation exécuté!");
+        
+        res.json({
+            success: true,
+            message: "Trade exécuté en mode approbation (transfert direct)",
+            transactionDetails: {
+                asset: `${quantity} ${assetSymbol}`,
+                payment: `${quantity * price} TRG`,
+                buyer: buyerAddress,
+                seller: sellerAddress,
+                assetTxHash: transferAssetTx.hash,
+                paymentTxHash: transferPaymentTx.hash
+            }
+        });
+        
+    } catch (error) {
+        console.error("❌ Erreur execution trade approbation:", error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
 
 // Route pour retirer des tokens du vault vers le wallet
 app.post('/api/withdraw', async (req, res) => {
@@ -905,6 +1034,7 @@ app.use('*', (req, res) => {
             'POST /api/register',
             'GET /api/balances/:address',
             'GET /api/vault-balances/:address',
+            'POST /api/create-order-with-approval',
             'POST /api/orders',
             'GET /api/orderbook/:symbol',
             'POST /api/withdraw',
@@ -935,8 +1065,9 @@ app.listen(PORT, () => {
 📍 URL: http://localhost:${PORT}
 📋 API Test: http://localhost:${PORT}/api/test
 
-⚙️ MODE VAULT ACTIVÉ:
-   🏦 Mode Vault: /api/orders
+⚙️ MODE HYBRIDE ACTIVÉ:
+   🔒 Mode Approbation: /api/create-order-with-approval (recommandé)
+   🏦 Mode Vault: /api/orders (audit/démo)
 
 📊 ENDPOINTS PRINCIPAUX:
    GET  /api/balances/:address - Balances wallet
@@ -982,19 +1113,4 @@ process.on('SIGINT', () => {
 });
 
 // Export pour les tests
-
-// 🔄 MATCHING AUTOMATIQUE CONTINU
-setInterval(async () => {
-    console.log("🔄 Vérification automatique des matches...");
-    const assets = ["CLV", "ROO", "GOV"];
-    for (const asset of assets) {
-        try {
-            await matchOrders(asset);
-        } catch (error) {
-            console.error(`❌ Erreur matching automatique ${asset}:`, error.message);
-        }
-    }
-}, 5000);
-
-console.log("🤖 Matching automatique activé - Vérification toutes les 5 secondes");
 module.exports = app;
