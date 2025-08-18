@@ -73,11 +73,55 @@ export default function ModernPortfolioWebSocket() {
         setWithdrawing(prev => ({ ...prev, [tokenSymbol]: true }));
 
         try {
+            // 🔥 ÉTAPE 1: Vérifier les ordres affectés
+            const checkResponse = await fetch('http://localhost:3001/api/get-affected-orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userAddress: account,
+                    tokenSymbol: tokenSymbol,
+                    withdrawAmount: amount
+                })
+            });
+
+            const checkData = await checkResponse.json();
+
+            if (!checkData.success) {
+                alert(`❌ Erreur: ${checkData.error}`);
+                return;
+            }
+
+            // 🔥 ÉTAPE 2: Demander confirmation si ordres affectés
+            if (checkData.affectedOrders.length > 0) {
+                const ordersList = checkData.affectedOrders.map(order => 
+                    `• ${order.order_type.toUpperCase()} ${order.quantity} ${order.asset_symbol} @ ${order.price} TRG`
+                ).join('\n');
+
+                const confirmed = window.confirm(
+                    `⚠️ This withdrawal will cancel ${checkData.affectedOrders.length} pending order(s):\n\n${ordersList}\n\nContinue with withdrawal?`
+                );
+
+                if (!confirmed) {
+                    return;
+                }
+
+                // 🔥 ÉTAPE 3: Annuler les ordres affectés
+                const cancelResponse = await fetch('http://localhost:3001/api/cancel-orders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        orderIds: checkData.affectedOrders.map(order => order.id)
+                    })
+                });
+
+                const cancelData = await cancelResponse.json();
+                console.log('📋 Ordres annulés:', cancelData);
+            }
+
+            // 🔥 ÉTAPE 4: Exécuter le retrait
             const response = await fetch('http://localhost:3001/api/withdraw', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     userAddress: account,
                     tokenSymbol: tokenSymbol,
@@ -88,7 +132,11 @@ export default function ModernPortfolioWebSocket() {
             const data = await response.json();
 
             if (data.success) {
-                alert(`✅ Retrait de ${amount} ${tokenSymbol} réussi!`);
+                const message = checkData.affectedOrders.length > 0 
+                    ? `✅ Withdrawal successful: ${amount} ${tokenSymbol}\n🗑️ ${checkData.affectedOrders.length} orders cancelled`
+                    : `✅ Withdrawal successful: ${amount} ${tokenSymbol}`;
+                
+                alert(message);
             } else {
                 alert(`❌ Erreur: ${data.error}`);
             }

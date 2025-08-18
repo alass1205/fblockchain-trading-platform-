@@ -1,5 +1,0 @@
-                        // Empêcher l'auto-trading (même utilisateur)
-                        if (buyOrder.user_address === sellOrder.user_address) {
-                            continue;
-                        }
-                        

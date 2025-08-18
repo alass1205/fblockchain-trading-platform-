@@ -18,6 +18,9 @@ export default function ModernAssetPageWebSocket() {
     const [price, setPrice] = useState('');
     const [creating, setCreating] = useState(false);
     const [depositing, setDepositing] = useState(false);
+    
+    // 🔥 NOUVEAU: État pour les notifications de matching
+    const [notification, setNotification] = useState('');
 
     // 🔥 WEBSOCKET: Remplace tous les auto-refresh !
     const { 
@@ -43,18 +46,6 @@ export default function ModernAssetPageWebSocket() {
         }
     }, [symbol]);
 
-    // ❌ SUPPRIMÉ: Plus besoin d'auto-refresh !
-    // useEffect(() => {
-    //     const interval = setInterval(() => {
-    //         if (account && symbol) {
-    //             loadOrderBook();
-    //             loadBalances(account);
-    //             loadVaultBalances(account);
-    //         }
-    //     }, 3000);
-    //     return () => clearInterval(interval);
-    // }, [account, symbol]);
-
     // 🔥 NOUVEAU: Demander l'orderbook spécifique via WebSocket
     useEffect(() => {
         if (socket && symbol && wsConnected) {
@@ -63,6 +54,28 @@ export default function ModernAssetPageWebSocket() {
         }
     }, [socket, symbol, wsConnected]);
 
+    // 🔥 NOUVEAU: Écouter les notifications de trade
+    useEffect(() => {
+        if (socket) {
+            socket.on('trade-executed', (trade) => {
+                if (trade.asset_symbol === symbol) {
+                    setNotification(`🎉 Trade executed: ${trade.quantity} ${symbol} at ${trade.price} TRG!`);
+                    setTimeout(() => setNotification(''), 5000);
+                }
+            });
+
+            socket.on('personal-trade', (trade) => {
+                setNotification(`✅ Your order was matched! ${trade.quantity} ${symbol} at ${trade.price} TRG`);
+                setTimeout(() => setNotification(''), 7000);
+            });
+
+            return () => {
+                socket.off('trade-executed');
+                socket.off('personal-trade');
+            };
+        }
+    }, [socket, symbol]);
+
     const checkWallet = async () => {
         if (typeof window !== 'undefined' && window.ethereum) {
             try {
@@ -70,10 +83,6 @@ export default function ModernAssetPageWebSocket() {
                 if (accounts.length > 0) {
                     setAccount(accounts[0]);
                     await loadAssetData();
-                    // ❌ SUPPRIMÉ: WebSocket s'en charge !
-                    // await loadBalances(accounts[0]);
-                    // await loadVaultBalances(accounts[0]);
-                    // await loadOrderBook();
                 } else {
                     router.push('/');
                 }
@@ -106,26 +115,92 @@ export default function ModernAssetPageWebSocket() {
         }
     };
 
-    // ❌ SUPPRIMÉ: Plus besoin de ces fonctions !
-    // const loadBalances = async (userAddress) => { ... }
-    // const loadVaultBalances = async (userAddress) => { ... }
-    // const loadOrderBook = async () => { ... }
+    // 🔥 NOUVELLE FONCTION: Obtenir le meilleur prix du marché
+    const getBestMarketPrice = (orderType) => {
+        if (!orderbook || (!orderbook.buyOrders?.length && !orderbook.sellOrders?.length)) {
+            return asset?.currentPrice || 10; // Prix par défaut
+        }
+        
+        if (orderType === 'buy') {
+            // Pour acheter, on regarde le meilleur prix de vente (plus bas)
+            if (orderbook.sellOrders && orderbook.sellOrders.length > 0) {
+                const bestSellPrice = Math.min(...orderbook.sellOrders.map(o => o.price));
+                return bestSellPrice;
+            }
+        } else {
+            // Pour vendre, on regarde le meilleur prix d'achat (plus haut)
+            if (orderbook.buyOrders && orderbook.buyOrders.length > 0) {
+                const bestBuyPrice = Math.max(...orderbook.buyOrders.map(o => o.price));
+                return bestBuyPrice;
+            }
+        }
+        
+        return asset?.currentPrice || 10; // Prix par défaut
+    };
+
+    // 🔥 NOUVELLE FONCTION: Acheter/Vendre au prix du marché
+    const handleMarketOrder = () => {
+        const marketPrice = getBestMarketPrice(orderType);
+        setPrice(marketPrice.toString());
+        
+        // Auto-remplir avec une quantité par défaut si vide
+        if (!quantity) {
+            setQuantity('1');
+        }
+    };
+
+    // 🔥 CORRECTION: Nouvelle fonction pour calculer les fonds disponibles après ordres pendants
+    const getAvailableFunds = (tokenSymbol) => {
+        const vaultBalance = parseFloat(vaultBalances[tokenSymbol] || 0);
+        
+        // Calculer les fonds "réservés" par les ordres pendants
+        let reservedAmount = 0;
+        
+        if (orderbook.buyOrders) {
+            orderbook.buyOrders.forEach(order => {
+                if (order.user_address.toLowerCase() === account.toLowerCase()) {
+                    if (tokenSymbol === 'TRG') {
+                        // Pour TRG, on réserve quantity * price pour les ordres d'achat
+                        reservedAmount += order.quantity * order.price;
+                    }
+                }
+            });
+        }
+        
+        if (orderbook.sellOrders) {
+            orderbook.sellOrders.forEach(order => {
+                if (order.user_address.toLowerCase() === account.toLowerCase()) {
+                    if (tokenSymbol !== 'TRG') {
+                        // Pour les assets (CLV, ROO, GOV), on réserve la quantité pour les ordres de vente
+                        reservedAmount += order.quantity;
+                    }
+                }
+            });
+        }
+        
+        return Math.max(0, vaultBalance - reservedAmount);
+    };
 
     const getRequiredFunds = () => {
-        if (!quantity || !price) return { token: '', amount: 0, available: 0, sufficient: true };
+        if (!quantity || !price) return { token: '', amount: 0, available: 0, sufficient: true, reserved: 0 };
         
         const tokenNeeded = orderType === 'sell' ? symbol : 'TRG';
         const amountNeeded = orderType === 'sell' ? parseFloat(quantity) : (parseFloat(quantity) * parseFloat(price));
-        const available = parseFloat(vaultBalances[tokenNeeded] || 0);
+        
+        // 🔥 NOUVEAU: Utiliser les fonds disponibles après réservations
+        const totalInVault = parseFloat(vaultBalances[tokenNeeded] || 0);
+        const availableAfterReservations = getAvailableFunds(tokenNeeded);
+        const reservedAmount = totalInVault - availableAfterReservations;
         
         return {
             token: tokenNeeded,
             amount: amountNeeded,
-            available: available,
-            sufficient: available >= amountNeeded
+            available: availableAfterReservations,
+            total: totalInVault,
+            reserved: reservedAmount,
+            sufficient: availableAfterReservations >= amountNeeded
         };
     };
-
     const handleVaultDeposit = async () => {
         if (typeof window === 'undefined' || !window.ethereum) {
             alert('MetaMask requis');
@@ -162,15 +237,35 @@ export default function ModernAssetPageWebSocket() {
             const depositTx = await vaultContract.deposit(CONTRACT_ADDRESSES[token], amountWei);
             await depositTx.wait();
             
-            alert(`✅ Dépôt de ${amount} ${token} réussi dans le vault!`);
+            setNotification(`✅ Vault deposit successful: ${amount} ${token}!`);
+            setTimeout(() => setNotification(''), 5000);
             
-            // 🔥 WEBSOCKET: Plus besoin de recharger manuellement !
-            // await loadBalances(account);
-            // await loadVaultBalances(account);
+            // 🔥 CORRECTION 1: Notification explicite au backend pour mise à jour WebSocket
+            try {
+                await fetch('http://localhost:3001/api/vault-deposit-notify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        userAddress: account,
+                        tokenSymbol: token,
+                        amount: amount
+                    })
+                });
+                console.log('📡 Backend notifié pour mise à jour balances');
+            } catch (notifyError) {
+                console.error('⚠️ Erreur notification backend:', notifyError);
+            }
+            
+            // 🔥 CORRECTION 2: Forcer la mise à jour immédiate via WebSocket
+            if (socket && wsConnected) {
+                socket.emit('request-balance-update', account);
+                console.log('🔄 Demande de mise à jour balances via WebSocket');
+            }
             
         } catch (error) {
             console.error('Erreur dépôt vault:', error);
-            alert('Erreur lors du dépôt: ' + error.message);
+            setNotification(`❌ Vault deposit failed: ${error.message}`);
+            setTimeout(() => setNotification(''), 5000);
         } finally {
             setDepositing(false);
         }
@@ -213,21 +308,21 @@ export default function ModernAssetPageWebSocket() {
             const data = await response.json();
 
             if (data.success) {
-                alert(`✅ Ordre ${orderType === 'buy' ? 'achat' : 'vente'} créé avec succès!`);
+                setNotification(`✅ ${orderType === 'buy' ? 'Buy' : 'Sell'} order created successfully!`);
+                setTimeout(() => setNotification(''), 5000);
                 setQuantity('');
                 
                 // 🔥 WEBSOCKET: Plus besoin de recharger manuellement !
                 // Les mises à jour arrivent automatiquement via WebSocket !
-                // await loadBalances(account);
-                // await loadVaultBalances(account);
-                // await loadOrderBook();
                 
             } else {
-                alert(`❌ Erreur: ${data.error}`);
+                setNotification(`❌ Order failed: ${data.error}`);
+                setTimeout(() => setNotification(''), 5000);
             }
         } catch (error) {
             console.error('Erreur création ordre:', error);
-            alert('Erreur lors de la création de l\'ordre');
+            setNotification('❌ Order creation failed');
+            setTimeout(() => setNotification(''), 5000);
         } finally {
             setCreating(false);
         }
@@ -322,6 +417,8 @@ export default function ModernAssetPageWebSocket() {
     }
 
     const funds = getRequiredFunds();
+    const marketPrice = getBestMarketPrice(orderType);
+    const hasOrders = (orderbook.buyOrders?.length > 0) || (orderbook.sellOrders?.length > 0);
 
     return (
         <div style={{
@@ -332,6 +429,26 @@ export default function ModernAssetPageWebSocket() {
             position: 'relative',
             overflow: 'hidden'
         }}>
+            {/* 🔥 NOTIFICATION BAR */}
+            {notification && (
+                <div style={{
+                    position: 'fixed',
+                    top: '20px',
+                    right: '20px',
+                    background: notification.includes('❌') ? 'rgba(255, 107, 107, 0.9)' : 'rgba(0, 255, 136, 0.9)',
+                    color: '#fff',
+                    padding: '15px 20px',
+                    borderRadius: '12px',
+                    zIndex: 1000,
+                    fontWeight: '600',
+                    maxWidth: '400px',
+                    boxShadow: '0 10px 30px rgba(0,0,0,0.3)',
+                    border: `1px solid ${notification.includes('❌') ? '#ff6b6b' : '#00ff88'}`
+                }}>
+                    {notification}
+                </div>
+            )}
+
             {/* Content */}
             <div style={{ position: 'relative', zIndex: 1 }}>
                 {/* Header */}
@@ -455,6 +572,15 @@ export default function ModernAssetPageWebSocket() {
                                 margin: '0'
                             }}>
                                 {asset.name} • Market Price: {asset.currentPrice} TRG
+                                {hasOrders && (
+                                    <span style={{
+                                        marginLeft: '15px',
+                                        color: getAssetColor(),
+                                        fontWeight: '700'
+                                    }}>
+                                        • Best: {marketPrice} TRG
+                                    </span>
+                                )}
                             </p>
                         )}
                         <div style={{
@@ -640,90 +766,90 @@ export default function ModernAssetPageWebSocket() {
                                                     </div>
                                                     <div style={{
                                                         fontSize: '12px',
-                                                        color: 'rgba(255,255,255,0.7)'
-                                                    }}>
-                                                        {formatAddress(order.user_address)}
-                                                        {order.user_address.toLowerCase() === account.toLowerCase() && 
-                                                            <span style={{ color: '#ff6b6b', fontWeight: '700' }}> (You)</span>
-                                                        }
-                                                    </div>
-                                                </div>
-                                            ))
-                                        ) : (
-                                            <div style={{
-                                                padding: '20px',
-                                                textAlign: 'center',
-                                                color: 'rgba(255,255,255,0.5)',
-                                                background: 'rgba(255, 255, 255, 0.05)',
-                                                borderRadius: '10px',
-                                                border: '1px dashed rgba(255,255,255,0.3)'
-                                            }}>
-                                                No sell orders yet
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+color: 'rgba(255,255,255,0.7)'
+                                                   }}>
+                                                       {formatAddress(order.user_address)}
+                                                       {order.user_address.toLowerCase() === account.toLowerCase() && 
+                                                           <span style={{ color: '#ff6b6b', fontWeight: '700' }}> (You)</span>
+                                                       }
+                                                   </div>
+                                               </div>
+                                           ))
+                                       ) : (
+                                           <div style={{
+                                               padding: '20px',
+                                               textAlign: 'center',
+                                               color: 'rgba(255,255,255,0.5)',
+                                               background: 'rgba(255, 255, 255, 0.05)',
+                                               borderRadius: '10px',
+                                               border: '1px dashed rgba(255,255,255,0.3)'
+                                           }}>
+                                               No sell orders yet
+                                           </div>
+                                       )}
+                                   </div>
+                               </div>
+                           </div>
+                       </div>
 
-                        {/* Trading Panel */}
-                        <div style={{
-                            background: 'rgba(255, 255, 255, 0.1)',
-                            backdropFilter: 'blur(20px)',
-                            borderRadius: '20px',
-                            padding: '30px',
-                            border: '1px solid rgba(255, 255, 255, 0.2)'
-                        }}>
-                            <h2 style={{
-                                fontSize: '24px',
-                                marginBottom: '25px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '10px'
-                            }}>
-                                🏦 Vault Trading
-                            </h2>
+                       {/* Trading Panel */}
+                       <div style={{
+                           background: 'rgba(255, 255, 255, 0.1)',
+                           backdropFilter: 'blur(20px)',
+                           borderRadius: '20px',
+                           padding: '30px',
+                           border: '1px solid rgba(255, 255, 255, 0.2)'
+                       }}>
+                           <h2 style={{
+                               fontSize: '24px',
+                               marginBottom: '25px',
+                               display: 'flex',
+                               alignItems: 'center',
+                               gap: '10px'
+                           }}>
+                               🏦 Vault Trading
+                           </h2>
 
-                            {/* Balance Overview - 🔥 WEBSOCKET DATA */}
-                            <div style={{
-                                background: `linear-gradient(135deg, ${getAssetColor()}20, rgba(255,255,255,0.1))`,
-                                borderRadius: '15px',
-                                padding: '20px',
-                                marginBottom: '25px',
-                                border: `1px solid ${getAssetColor()}30`
-                            }}>
-                                <h3 style={{ marginBottom: '15px', fontSize: '18px' }}>💰 Your Balances</h3>
-                                <div style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: '1fr 1fr',
-                                    gap: '15px'
-                                }}>
-                                    <div>
-                                        <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.7)', marginBottom: '5px' }}>
-                                            🏦 Wallet
-                                        </div>
-                                        <div style={{ fontSize: '16px', fontWeight: '700' }}>
-                                            TRG: {balances.TRG || 0}
-                                        </div>
-                                        <div style={{ fontSize: '16px', fontWeight: '700' }}>
-                                            {symbol}: {balances[symbol] || 0}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.7)', marginBottom: '5px' }}>
-                                            🏛️ Vault
-                                        </div>
-                                        <div style={{ fontSize: '16px', fontWeight: '700', color: getAssetColor() }}>
-                                            TRG: {vaultBalances.TRG || 0}
-                                        </div>
-                                        <div style={{ fontSize: '16px', fontWeight: '700', color: getAssetColor() }}>
-                                            {symbol}: {vaultBalances[symbol] || 0}
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                {/* 🔥 WEBSOCKET STATUS */}
-<div style={{
+                           {/* Balance Overview - 🔥 WEBSOCKET DATA */}
+                           <div style={{
+                               background: `linear-gradient(135deg, ${getAssetColor()}20, rgba(255,255,255,0.1))`,
+                               borderRadius: '15px',
+                               padding: '20px',
+                               marginBottom: '25px',
+                               border: `1px solid ${getAssetColor()}30`
+                           }}>
+                               <h3 style={{ marginBottom: '15px', fontSize: '18px' }}>💰 Your Balances</h3>
+                               <div style={{
+                                   display: 'grid',
+                                   gridTemplateColumns: '1fr 1fr',
+                                   gap: '15px'
+                               }}>
+                                   <div>
+                                       <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.7)', marginBottom: '5px' }}>
+                                           🏦 Wallet
+                                       </div>
+                                       <div style={{ fontSize: '16px', fontWeight: '700' }}>
+                                           TRG: {balances.TRG || 0}
+                                       </div>
+                                       <div style={{ fontSize: '16px', fontWeight: '700' }}>
+                                           {symbol}: {balances[symbol] || 0}
+                                       </div>
+                                   </div>
+                                   <div>
+                                       <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.7)', marginBottom: '5px' }}>
+                                           🏛️ Vault
+                                       </div>
+                                       <div style={{ fontSize: '16px', fontWeight: '700', color: getAssetColor() }}>
+                                           TRG: {vaultBalances.TRG || 0}
+                                       </div>
+                                       <div style={{ fontSize: '16px', fontWeight: '700', color: getAssetColor() }}>
+                                           {symbol}: {vaultBalances[symbol] || 0}
+                                       </div>
+                                   </div>
+                               </div>
+                               
+                               {/* 🔥 WEBSOCKET STATUS */}
+                               <div style={{
                                    marginTop: '15px',
                                    padding: '10px',
                                    background: wsConnected ? 'rgba(0, 255, 136, 0.2)' : 'rgba(255, 107, 107, 0.2)',
@@ -791,6 +917,50 @@ export default function ModernAssetPageWebSocket() {
                                    </div>
                                </div>
 
+                               {/* 🔥 NOUVEAU: Market Price Helper */}
+                               {hasOrders && (
+                                   <div style={{
+                                       background: 'rgba(0, 212, 255, 0.2)',
+                                       border: '1px solid #00d4ff',
+                                       borderRadius: '12px',
+                                       padding: '15px',
+                                       marginBottom: '20px'
+                                   }}>
+                                       <div style={{
+                                           display: 'flex',
+                                           alignItems: 'center',
+                                           justifyContent: 'space-between',
+                                           marginBottom: '10px'
+                                       }}>
+                                           <span style={{ fontWeight: '700' }}>
+                                               🎯 Best Market Price: {marketPrice} TRG
+                                           </span>
+                                           <button
+                                               type="button"
+                                               onClick={handleMarketOrder}
+                                               style={{
+                                                   background: 'linear-gradient(45deg, #00d4ff, #0099cc)',
+                                                   border: 'none',
+                                                   borderRadius: '8px',
+                                                   padding: '8px 12px',
+                                                   color: '#000',
+                                                   fontWeight: '600',
+                                                   cursor: 'pointer',
+                                                   fontSize: '12px'
+                                               }}
+                                           >
+                                               Use Market Price
+                                           </button>
+                                       </div>
+                                       <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.8)' }}>
+                                           {orderType === 'buy' 
+                                               ? `Best available sell price: ${marketPrice} TRG`
+                                               : `Best available buy price: ${marketPrice} TRG`
+                                           }
+                                       </div>
+                                   </div>
+                               )}
+
                                {/* Quantity Input */}
                                <div style={{ marginBottom: '20px' }}>
                                    <label style={{
@@ -855,6 +1025,11 @@ export default function ModernAssetPageWebSocket() {
                                        marginTop: '5px'
                                    }}>
                                        Suggested: {asset?.currentPrice || 10} TRG
+                                       {hasOrders && (
+                                           <span style={{ color: getAssetColor(), marginLeft: '10px' }}>
+                                               • Market: {marketPrice} TRG
+                                           </span>
+                                       )}
                                    </div>
                                </div>
 
@@ -882,12 +1057,20 @@ export default function ModernAssetPageWebSocket() {
                                                Fund Verification
                                            </span>
                                        </div>
-                                       <div style={{ fontSize: '14px', marginBottom: '8px' }}>
-                                           Required: <strong>{funds.amount} {funds.token}</strong>
-                                       </div>
-                                       <div style={{ fontSize: '14px', marginBottom: '8px' }}>
-                                           Available in vault: <strong>{funds.available} {funds.token}</strong>
-                                       </div>
+                                        <div style={{ fontSize: '14px', marginBottom: '8px' }}>
+                                            Required: <strong>{funds.amount} {funds.token}</strong>
+                                        </div>
+                                        <div style={{ fontSize: '14px', marginBottom: '8px' }}>
+                                            Total in vault: <strong>{funds.total} {funds.token}</strong>
+                                        </div>
+                                        {funds.reserved > 0 && (
+                                            <div style={{ fontSize: '14px', marginBottom: '8px', color: '#ffb900' }}>
+                                                Reserved by pending orders: <strong>{funds.reserved} {funds.token}</strong>
+                                            </div>
+                                        )}
+                                        <div style={{ fontSize: '14px', marginBottom: '8px', color: getAssetColor() }}>
+                                            Available for new orders: <strong>{funds.available} {funds.token}</strong>
+                                        </div>
                                        
                                        {!funds.sufficient && (
                                            <button
@@ -956,6 +1139,18 @@ export default function ModernAssetPageWebSocket() {
                                        <div style={{ fontSize: '18px', fontWeight: '700', color: getAssetColor() }}>
                                            Total: {(parseFloat(quantity || 0) * parseFloat(price || 0)).toFixed(2)} TRG
                                        </div>
+                                       {hasOrders && Math.abs(parseFloat(price) - marketPrice) > 0.1 && (
+                                           <div style={{
+                                               fontSize: '12px',
+                                               color: parseFloat(price) > marketPrice ? '#ffb900' : '#00ff88',
+                                               marginTop: '5px'
+                                           }}>
+                                               {parseFloat(price) > marketPrice 
+                                                   ? `⚠️ ${((parseFloat(price) - marketPrice) / marketPrice * 100).toFixed(1)}% above market`
+                                                   : `✅ ${((marketPrice - parseFloat(price)) / marketPrice * 100).toFixed(1)}% below market`
+                                               }
+                                           </div>
+                                       )}
                                    </div>
                                )}
                            </form>

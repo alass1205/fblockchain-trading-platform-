@@ -5,8 +5,18 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { ethers } = require('ethers');
+const http = require('http');
+const socketIo = require('socket.io');
 
 const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+    cors: {
+        origin: "http://localhost:3000",
+        methods: ["GET", "POST"]
+    }
+});
+
 const PORT = 3001;
 
 // Middleware
@@ -14,12 +24,10 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
-// Créer le dossier uploads s'il n'existe pas
 if (!fs.existsSync('uploads')) {
     fs.mkdirSync('uploads');
 }
 
-// Configuration multer pour upload fichiers
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, 'uploads/');
@@ -30,10 +38,8 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// Base de données SQLite
 const db = new sqlite3.Database('./trading.db');
 
-// Initialisation de la base de données
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (
         wallet_address TEXT PRIMARY KEY,
@@ -50,147 +56,362 @@ db.serialize(() => {
         quantity REAL NOT NULL,
         price REAL NOT NULL,
         status TEXT DEFAULT 'pending',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        mode TEXT DEFAULT 'vault'
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    db.run(`CREATE TABLE IF NOT EXISTS assets (
-        symbol TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        type TEXT NOT NULL,
-        contract_address TEXT,
-        current_price REAL DEFAULT 10.0
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS price_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        asset_symbol TEXT NOT NULL,
-        price REAL NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Table pour l'historique des trades
     db.run(`CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        asset_symbol TEXT NOT NULL,
         buyer_address TEXT NOT NULL,
         seller_address TEXT NOT NULL,
+        asset_symbol TEXT NOT NULL,
         quantity REAL NOT NULL,
         price REAL NOT NULL,
         total_amount REAL NOT NULL,
-        tx_hash TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
     console.log('✅ Base de données initialisée');
 });
 
-// Routes API
+// ======== FONCTIONS BALANCES BLOCKCHAIN ========
 
-// Test de l'API
-app.get('/api/test', (req, res) => {
-    res.json({ success: true, message: 'API backend fonctionne!' });
-});
-
-// Inscription utilisateur (CORRIGÉE)
-app.post('/api/register', upload.single('passport'), (req, res) => {
-    const { walletAddress, legalName } = req.body;
-    const passportPicture = req.file ? req.file.filename : null;
-
-    console.log('📝 Inscription utilisateur:', { walletAddress, legalName, passportPicture });
-
-    db.run(
-        'INSERT OR REPLACE INTO users (wallet_address, legal_name, passport_picture) VALUES (?, ?, ?)',
-        [walletAddress, legalName, passportPicture],
-        function(err) {
-            if (err) {
-                console.error('❌ Erreur inscription:', err);
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                console.log('✅ Utilisateur inscrit:', walletAddress);
-                res.json({ success: true, message: 'Utilisateur enregistré avec succès' });
+async function getBalances(userAddress) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+            const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+            
+            if (!fs.existsSync(addressesPath)) {
+                console.log('⚠️ deployed-addresses.json non trouvé');
+                resolve({ TRG: '0', CLV: '0', ROO: '0', GOV: '0' });
+                return;
             }
+            
+            const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+            
+            const erc20ABI = ["function balanceOf(address owner) view returns (uint256)"];
+            const bondABI = ["function getBondsByOwner(address owner) view returns (uint256[])"];
+            
+            const balances = {};
+            
+            // TRG Balance
+            const trgContract = new ethers.Contract(addresses.TRG, erc20ABI, provider);
+            const trgBalance = await trgContract.balanceOf(userAddress);
+            balances.TRG = ethers.utils.formatEther(trgBalance);
+            
+            // CLV Balance
+            const clvContract = new ethers.Contract(addresses.CLV, erc20ABI, provider);
+            const clvBalance = await clvContract.balanceOf(userAddress);
+            balances.CLV = ethers.utils.formatEther(clvBalance);
+            
+            // ROO Balance
+            const rooContract = new ethers.Contract(addresses.ROO, erc20ABI, provider);
+            const rooBalance = await rooContract.balanceOf(userAddress);
+            balances.ROO = ethers.utils.formatEther(rooBalance);
+            
+            // GOV Bonds
+            try {
+                const govContract = new ethers.Contract(addresses.GOV, bondABI, provider);
+                const bonds = await govContract.getBondsByOwner(userAddress);
+                balances.GOV = bonds.length.toString();
+            } catch (error) {
+                balances.GOV = '0';
+            }
+            
+            resolve(balances);
+        } catch (error) {
+            console.error('❌ Erreur getBalances:', error);
+            resolve({ TRG: '0', CLV: '0', ROO: '0', GOV: '0' });
         }
-    );
-});
+    });
+}
 
-// Vérifier si un utilisateur est inscrit
-app.get('/api/user/:address', (req, res) => {
-    const { address } = req.params;
+async function getVaultBalances(userAddress) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+            const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+            
+            if (!fs.existsSync(addressesPath)) {
+                console.log('⚠️ deployed-addresses.json non trouvé');
+                resolve({ TRG: '0', CLV: '0', ROO: '0', GOV: '0' });
+                return;
+            }
+            
+            const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+            
+            const vaultABI = ["function getBalance(address token, address user) external view returns (uint256)"];
+            const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, provider);
+            
+            const vaultBalances = {};
+            
+            // TRG dans vault
+            const trgVault = await vaultContract.getBalance(addresses.TRG, userAddress);
+            vaultBalances.TRG = ethers.utils.formatEther(trgVault);
+            
+            // CLV dans vault
+            const clvVault = await vaultContract.getBalance(addresses.CLV, userAddress);
+            vaultBalances.CLV = ethers.utils.formatEther(clvVault);
+            
+            // ROO dans vault
+            const rooVault = await vaultContract.getBalance(addresses.ROO, userAddress);
+            vaultBalances.ROO = ethers.utils.formatEther(rooVault);
+            
+            // GOV pas dans vault (bonds)
+            vaultBalances.GOV = '0';
+            
+            resolve(vaultBalances);
+        } catch (error) {
+            console.error('❌ Erreur getVaultBalances:', error);
+            resolve({ TRG: '0', CLV: '0', ROO: '0', GOV: '0' });
+        }
+    });
+}
+
+// ======== FONCTION TRANSFERT BLOCKCHAIN RÉEL ========
+
+async function executeBlockchainTransfer(buyerAddress, sellerAddress, assetSymbol, quantity, price) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            console.log('🔗 DÉBUT TRANSFERT BLOCKCHAIN RÉEL:', {
+                buyer: buyerAddress.slice(0,10) + '...',
+                seller: sellerAddress.slice(0,10) + '...',
+                asset: `${quantity} ${assetSymbol}`,
+                price: `${price} TRG`
+            });
+            
+            const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+            const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+            
+            if (!fs.existsSync(addressesPath)) {
+                throw new Error('Contrats non déployés');
+            }
+            
+            const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+            
+            // Clé privée du deployer (owner du vault)
+            const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+            const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+            
+            // ABI du vault
+            const vaultABI = [
+                "function transferFromVault(address token, address from, address to, uint256 amount) external",
+                "function getBalance(address token, address user) external view returns (uint256)"
+            ];
+            
+            const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
+            
+            const quantityWei = ethers.utils.parseEther(quantity.toString());
+            const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
+            
+            // ÉTAPE 1: Vérifier les balances vault
+            console.log('🔍 Vérification des balances vault...');
+            const sellerAssetBalance = await vaultContract.getBalance(addresses[assetSymbol], sellerAddress);
+            const buyerTrgBalance = await vaultContract.getBalance(addresses.TRG, buyerAddress);
+            
+            console.log(`💰 Vendeur ${assetSymbol}:`, ethers.utils.formatEther(sellerAssetBalance));
+            console.log(`💰 Acheteur TRG:`, ethers.utils.formatEther(buyerTrgBalance));
+            
+            if (sellerAssetBalance.lt(quantityWei)) {
+                throw new Error(`Vendeur n'a pas assez de ${assetSymbol} dans le vault`);
+            }
+            
+            if (buyerTrgBalance.lt(totalPriceWei)) {
+                throw new Error(`Acheteur n'a pas assez de TRG dans le vault`);
+            }
+            
+            // ÉTAPE 2: Transfert de l'asset du vendeur vers l'acheteur
+            console.log(`📦 Transfert ${quantity} ${assetSymbol}: ${sellerAddress.slice(0,8)} → ${buyerAddress.slice(0,8)}`);
+            const assetTx = await vaultContract.transferFromVault(
+                addresses[assetSymbol],
+                sellerAddress,
+                buyerAddress,
+                quantityWei
+            );
+            await assetTx.wait();
+            console.log('✅ Asset transféré, hash:', assetTx.hash);
+            
+            // ÉTAPE 3: Transfert des TRG de l'acheteur vers le vendeur
+            console.log(`💰 Transfert ${quantity * price} TRG: ${buyerAddress.slice(0,8)} → ${sellerAddress.slice(0,8)}`);
+            const trgTx = await vaultContract.transferFromVault(
+                addresses.TRG,
+                buyerAddress,
+                sellerAddress,
+                totalPriceWei
+            );
+            await trgTx.wait();
+            console.log('✅ TRG transférés, hash:', trgTx.hash);
+            
+            console.log('🎉 TRANSFERT BLOCKCHAIN RÉEL TERMINÉ AVEC SUCCÈS!');
+            resolve({
+                success: true,
+                assetTxHash: assetTx.hash,
+                trgTxHash: trgTx.hash
+            });
+            
+        } catch (error) {
+            console.error('❌ ERREUR TRANSFERT BLOCKCHAIN:', error.message);
+            reject(error);
+        }
+    });
+}
+
+// ======== WEBSOCKET ========
+
+const connectedUsers = new Map();
+
+io.on('connection', (socket) => {
+    console.log('🔌 Client connecté:', socket.id);
     
-    db.get(
-        'SELECT * FROM users WHERE wallet_address = ?',
-        [address],
-        (err, row) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else if (row) {
-                res.json({ success: true, registered: true, user: row });
-            } else {
-                res.json({ success: true, registered: false });
-            }
+    socket.on('authenticate', (userAddress) => {
+        console.log('🔐 Utilisateur authentifié:', userAddress);
+        connectedUsers.set(socket.id, userAddress);
+        socket.userAddress = userAddress;
+        socket.join('global-updates');
+        socket.join(`user-${userAddress}`);
+        sendInitialData(socket, userAddress);
+    });
+
+    socket.on('request-orderbook', async (symbol) => {
+        console.log('📊 Demande orderbook pour:', symbol);
+        try {
+            const orderbook = await getOrderbook(symbol);
+            socket.emit('orderbook-update', {
+                symbol: symbol,
+                orderbook: orderbook
+            });
+        } catch (error) {
+            console.error('❌ Erreur envoi orderbook:', error);
         }
-    );
+    });
+    
+    socket.on('disconnect', () => {
+        console.log('🔌 Client déconnecté:', socket.id);
+        connectedUsers.delete(socket.id);
+    });
 });
 
-// Récupération des balances blockchain
+function broadcastOrderbookUpdate(assetSymbol, orderbook) {
+    io.to('global-updates').emit('orderbook-update', {
+        symbol: assetSymbol,
+        orderbook: orderbook
+    });
+}
+
+function broadcastTradeExecuted(trade) {
+    io.to('global-updates').emit('trade-executed', trade);
+    io.to(`user-${trade.buyer_address}`).emit('personal-trade', trade);
+    io.to(`user-${trade.seller_address}`).emit('personal-trade', trade);
+}
+
+async function sendInitialData(socket, userAddress) {
+    try {
+        // Envoyer les balances
+        const balances = await getBalances(userAddress);
+        const vaultBalances = await getVaultBalances(userAddress);
+        
+        socket.emit('balances-update', {
+            walletBalances: balances,
+            vaultBalances: vaultBalances
+        });
+        
+        // Envoyer les ordres
+        const orders = await getUserOrders(userAddress);
+        socket.emit('orders-update', orders);
+        
+        // Envoyer les trades
+        const trades = await getUserTrades(userAddress);
+        socket.emit('trades-update', trades);
+        
+        console.log('📤 Données initiales envoyées pour:', userAddress);
+        
+    } catch (error) {
+        console.error('❌ Erreur envoi données initiales:', error);
+    }
+}
+
+async function getUserOrders(userAddress) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            'SELECT * FROM orders WHERE user_address = ? ORDER BY created_at DESC',
+            [userAddress],
+            (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows || []);
+            }
+        );
+    });
+}
+
+async function getUserTrades(userAddress) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            `SELECT * FROM trades 
+             WHERE buyer_address = ? OR seller_address = ? 
+             ORDER BY created_at DESC 
+             LIMIT 50`,
+            [userAddress, userAddress],
+            (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    const trades = rows.map(trade => ({
+                        ...trade,
+                        side: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() ? "buy" : "sell",
+                        counterparty: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() 
+                            ? trade.seller_address || "Unknown"
+                            : trade.buyer_address || "Unknown"
+                    }));
+                    resolve(trades);
+                }
+            }
+        );
+    });
+}
+
+async function getOrderbook(assetSymbol) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY price DESC, created_at ASC',
+            [assetSymbol, 'pending'],
+            (err, orders) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    const buyOrders = orders.filter(o => o.order_type === 'buy');
+                    const sellOrders = orders.filter(o => o.order_type === 'sell');
+                    
+                    resolve({
+                        symbol: assetSymbol,
+                        buyOrders: buyOrders,
+                        sellOrders: sellOrders,
+                        totalOrders: orders.length
+                    });
+                }
+            }
+        );
+    });
+}
+
+// ======== ROUTES API ========
+
+app.get('/api/test', (req, res) => {
+    res.json({ success: true, message: 'API backend WebSocket fonctionne!' });
+});
+
+// Route pour récupérer les balances wallet
 app.get('/api/balances/:address', async (req, res) => {
     const { address } = req.params;
+    console.log('💰 Récupération balances pour:', address);
     
     try {
-        console.log('📊 Récupération balances pour:', address);
-        
-        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
-        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
-        
-        console.log('📋 DEBUG - Adresses chargées:', addresses);
-        
-        const erc20ABI = [
-            "function balanceOf(address owner) view returns (uint256)"
-        ];
-        
-        const bondABI = [
-            "function getBondsByOwner(address owner) view returns (uint256[])"
-        ];
-        
-        const balances = {};
-        
-        // TRG Balance
-        const trgContract = new ethers.Contract(addresses.TRG, erc20ABI, provider);
-        const trgBalance = await trgContract.balanceOf(address);
-        balances.TRG = ethers.utils.formatEther(trgBalance);
-        
-        // CLV Balance
-        const clvContract = new ethers.Contract(addresses.CLV, erc20ABI, provider);
-        const clvBalance = await clvContract.balanceOf(address);
-        balances.CLV = ethers.utils.formatEther(clvBalance);
-        
-        // ROO Balance
-        const rooContract = new ethers.Contract(addresses.ROO, erc20ABI, provider);
-        const rooBalance = await rooContract.balanceOf(address);
-        balances.ROO = ethers.utils.formatEther(rooBalance);
-        
-        // GOV Bonds
-        try {
-            const govContract = new ethers.Contract(addresses.GOV, bondABI, provider);
-            const bonds = await govContract.getBondsByOwner(address);
-            balances.GOV = bonds.length.toString();
-        } catch (error) {
-            console.log('⚠️ Erreur GOV bonds:', error.message);
-            balances.GOV = '0';
-        }
-
-        console.log('✅ Balances récupérées:', balances);
-        
+        const balances = await getBalances(address);
         res.json({
             success: true,
-            address: address,
             balances: balances
         });
-
     } catch (error) {
-        console.error('❌ Erreur balances:', error);
+        console.error('❌ Erreur récupération balances:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -201,46 +422,16 @@ app.get('/api/balances/:address', async (req, res) => {
 // Route pour récupérer les balances vault
 app.get('/api/vault-balances/:address', async (req, res) => {
     const { address } = req.params;
+    console.log('🏦 Récupération vault balances pour:', address);
     
     try {
-        console.log('🏦 Récupération balances vault pour:', address);
-        
-        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
-        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
-        
-        const vaultABI = [
-            "function getBalance(address token, address user) external view returns (uint256)"
-        ];
-        
-        const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, provider);
-        const vaultBalances = {};
-        
-        // TRG dans vault
-        const trgVault = await vaultContract.getBalance(addresses.TRG, address);
-        vaultBalances.TRG = ethers.utils.formatEther(trgVault);
-        
-        // CLV dans vault
-        const clvVault = await vaultContract.getBalance(addresses.CLV, address);
-        vaultBalances.CLV = ethers.utils.formatEther(clvVault);
-        
-        // ROO dans vault
-        const rooVault = await vaultContract.getBalance(addresses.ROO, address);
-        vaultBalances.ROO = ethers.utils.formatEther(rooVault);
-        
-        // GOV pas dans vault (bonds)
-        vaultBalances.GOV = '0';
-        
-        console.log('✅ Balances vault récupérées:', vaultBalances);
-        
+        const vaultBalances = await getVaultBalances(address);
         res.json({
             success: true,
-            address: address,
-            balances: vaultBalances
+            vaultBalances: vaultBalances
         });
-        
     } catch (error) {
-        console.error('❌ Erreur vault balances:', error);
+        console.error('❌ Erreur récupération vault balances:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -248,79 +439,256 @@ app.get('/api/vault-balances/:address', async (req, res) => {
     }
 });
 
-
-
-// 🏦 MODE VAULT - Création d'ordres standard
-app.post('/api/orders', (req, res) => {
-    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
+// 🔥 NOUVELLE ROUTE: Notification dépôt vault
+app.post('/api/vault-deposit-notify', async (req, res) => {
+    const { userAddress, tokenSymbol, amount } = req.body;
     
-    console.log('📝 Création ordre mode vault:', { userAddress, assetSymbol, orderType, quantity, price });
+    console.log('🏦 Notification dépôt vault:', { userAddress, tokenSymbol, amount });
     
+    try {
+        // Attendre un peu que la transaction soit minée
+        setTimeout(async () => {
+            try {
+                // Récupérer les nouvelles balances
+                const balances = await getBalances(userAddress);
+                const vaultBalances = await getVaultBalances(userAddress);
+                
+                // Envoyer via WebSocket à l'utilisateur
+                io.to(`user-${userAddress}`).emit('balances-update', {
+                    walletBalances: balances,
+                    vaultBalances: vaultBalances
+                });
+                
+                console.log('📡 Balances mises à jour via WebSocket après dépôt vault pour:', userAddress);
+            } catch (error) {
+                console.error('❌ Erreur mise à jour balances post-dépôt:', error);
+            }
+        }, 3000); // Attendre 3 secondes pour que la transaction soit confirmée
+        
+        res.json({ 
+            success: true, 
+            message: 'Notification reçue, balances seront mises à jour' 
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur notification dépôt:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/register', upload.single('passport'), (req, res) => {
+    const { walletAddress, legalName } = req.body;
+    const passportPicture = req.file ? req.file.filename : null;
+
     db.run(
-        'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price, mode) VALUES (?, ?, ?, ?, ?, ?)',
-        [userAddress, assetSymbol, orderType, quantity, price, 'vault'],
+        'INSERT OR REPLACE INTO users (wallet_address, legal_name, passport_picture) VALUES (?, ?, ?)',
+        [walletAddress, legalName, passportPicture],
         function(err) {
             if (err) {
-                console.error('❌ Erreur création ordre vault:', err);
                 res.status(500).json({ success: false, error: err.message });
             } else {
-                console.log('✅ Ordre créé mode vault - ID:', this.lastID);
-                
-                setTimeout(() => {
-                    matchOrders(assetSymbol);
-                }, 1000);
-                
                 res.json({ 
                     success: true, 
-                    orderId: this.lastID,
-                    message: 'Ordre créé avec succès (mode vault)',
-                    mode: 'vault'
+                    message: 'Utilisateur inscrit avec succès'
                 });
             }
         }
     );
 });
 
-// Récupération des ordres par asset
-app.get('/api/orders/:symbol', (req, res) => {
+app.get('/api/check-registration/:address', (req, res) => {
+    const { address } = req.params;
+    
+    db.get(
+        'SELECT * FROM users WHERE wallet_address = ?',
+        [address],
+        (err, row) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else if (row) {
+                res.json({ 
+                    success: true, 
+                    registered: true, 
+                    user: { 
+                        wallet_address: row.wallet_address,
+                        legal_name: row.legal_name
+                    }
+                });
+            } else {
+                res.json({ success: true, registered: false });
+            }
+        }
+    );
+});
+
+app.get('/api/assets/:symbol', (req, res) => {
+    const { symbol } = req.params;
+    
+    const assetData = {
+        CLV: {
+            symbol: 'CLV',
+            name: 'Clove Company',
+            type: 'share',
+            currentPrice: 10
+        },
+        ROO: {
+            symbol: 'ROO', 
+            name: 'Rooibos Limited',
+            type: 'share',
+            currentPrice: 10
+        },
+        GOV: {
+            symbol: 'GOV',
+            name: 'Government Bonds',
+            type: 'bond',
+            currentPrice: 200
+        }
+    };
+    
+    const asset = assetData[symbol];
+    
+    if (asset) {
+        res.json({ success: true, asset: asset });
+    } else {
+        res.status(404).json({ success: false, error: `Asset ${symbol} non trouvé` });
+    }
+});
+
+app.get('/api/orderbook/:symbol', (req, res) => {
     const { symbol } = req.params;
     
     db.all(
-        'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY created_at DESC',
+        'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY price DESC, created_at ASC',
         [symbol, 'pending'],
-        (err, rows) => {
+        (err, orders) => {
             if (err) {
                 res.status(500).json({ success: false, error: err.message });
             } else {
-                res.json({ success: true, orders: rows });
-            }
-        }
-    );
-});
-
-// Route pour récupérer les ordres d'un utilisateur
-app.get('/api/user-orders/:address', (req, res) => {
-    const { address } = req.params;
-    
-    db.all(
-        'SELECT * FROM orders WHERE user_address = ? ORDER BY created_at DESC',
-        [address],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                res.json({ 
-                    success: true, 
-                    orders: rows || []
+                const buyOrders = orders.filter(o => o.order_type === 'buy');
+                const sellOrders = orders.filter(o => o.order_type === 'sell');
+                
+                res.json({
+                    success: true,
+                    orderbook: {
+                        symbol: symbol,
+                        buyOrders: buyOrders,
+                        sellOrders: sellOrders,
+                        totalOrders: orders.length
+                    }
                 });
             }
         }
     );
 });
 
-// Fonction de matching avancée avec trades partiels
-async function matchOrders(assetSymbol) {
-    console.log('🎯 Matching orders pour', assetSymbol);
+app.post('/api/orders', (req, res) => {
+    const { userAddress, assetSymbol, orderType, quantity, price } = req.body;
+    
+    if (!userAddress || !assetSymbol || !orderType || !quantity || !price) {
+        return res.status(400).json({
+            success: false,
+            error: 'Tous les champs sont requis'
+        });
+    }
+    
+    db.run(
+        'INSERT INTO orders (user_address, asset_symbol, order_type, quantity, price) VALUES (?, ?, ?, ?, ?)',
+        [userAddress, assetSymbol, orderType, quantity, price],
+        function(err) {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                const newOrder = {
+                    id: this.lastID,
+                    user_address: userAddress,
+                    asset_symbol: assetSymbol,
+                    order_type: orderType,
+                    quantity: quantity,
+                    price: price,
+                    status: 'pending'
+                };
+                
+                res.json({
+                    success: true,
+                    message: 'Ordre créé avec succès',
+                    order: newOrder
+                });
+                
+                // Broadcast de la mise à jour via WebSocket
+                getOrderbook(assetSymbol).then(orderbook => {
+                    broadcastOrderbookUpdate(assetSymbol, orderbook);
+                });
+                
+                // 🔥 NOUVEAU: Tentative de matching automatique
+                tryAutoMatching(assetSymbol);
+            }
+        }
+    );
+});
+
+app.get('/api/orders/:userAddress', (req, res) => {
+    const { userAddress } = req.params;
+    
+    db.all(
+        'SELECT * FROM orders WHERE user_address = ? ORDER BY created_at DESC',
+        [userAddress],
+        (err, orders) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                res.json({ success: true, orders: orders });
+            }
+        }
+    );
+});
+
+app.get('/api/trades/:userAddress', (req, res) => {
+    const { userAddress } = req.params;
+    
+    db.all(
+        `SELECT * FROM trades 
+         WHERE buyer_address = ? OR seller_address = ? 
+         ORDER BY created_at DESC 
+         LIMIT 50`,
+        [userAddress, userAddress],
+        (err, rows) => {
+            if (err) {
+                res.status(500).json({ success: false, error: err.message });
+            } else {
+                    const trades = rows.map(trade => ({
+                        ...trade,
+                        side: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() ? "buy" : "sell",
+                        counterparty: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() 
+                            ? trade.seller_address || "Unknown"
+                            : trade.buyer_address || "Unknown"
+                    }));
+                
+                res.json({ success: true, trades: trades });
+            }
+        }
+    );
+});
+
+// Route de test pour déclencher le matching
+app.post("/api/test-matching", async (req, res) => {
+    const { assetSymbol } = req.body;
+    console.log("🧪 Test matching manuel pour:", assetSymbol);
+    
+    try {
+        await tryAutoMatching(assetSymbol || "CLV");
+        res.json({ success: true, message: "Matching testé" });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ======== FONCTION DE MATCHING AUTOMATIQUE CORRIGÉE ========
+
+async function tryAutoMatching(assetSymbol) {
+    console.log('🎯 Tentative de matching automatique pour', assetSymbol);
     
     return new Promise((resolve) => {
         db.all(
@@ -341,194 +709,226 @@ async function matchOrders(assetSymbol) {
                     sell: sellOrders.length 
                 });
                 
-                // Afficher les ordres pour debugging
                 console.log('🔵 Ordres d\'achat:', buyOrders.map(o => `${o.quantity}@${o.price} (${o.user_address.slice(0,8)})`));
                 console.log('🔴 Ordres de vente:', sellOrders.map(o => `${o.quantity}@${o.price} (${o.user_address.slice(0,8)})`));
                 
                 for (const sellOrder of sellOrders) {
                     for (const buyOrder of buyOrders) {
-                        // Condition de matching : prix compatible et utilisateurs différents
+                        // CONDITION: prix compatible ET utilisateurs différents
                         if (buyOrder.price >= sellOrder.price && 
                             buyOrder.user_address !== sellOrder.user_address &&
                             buyOrder.quantity > 0 && sellOrder.quantity > 0) {
                             
                             // Déterminer la quantité à échanger (minimum des deux)
                             const tradeQuantity = Math.min(buyOrder.quantity, sellOrder.quantity);
-                            // Déterminer la quantité à échanger (minimum des deux)
                             
-                            // NOUVEAU: Déterminer le mode de trade (priorité au mode vault pour compatibilité)
-                            
-                            console.log('💥 Match trouvé!', {
-                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG [${buyOrder.mode}]`,
-                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG [${sellOrder.mode}]`,
+                            console.log('💥 MATCH TROUVÉ!', {
+                                buy: `${buyOrder.quantity} @ ${buyOrder.price} TRG`,
+                                sell: `${sellOrder.quantity} @ ${sellOrder.price} TRG`,
                                 tradeQuantity: tradeQuantity,
-                                type: tradeQuantity === buyOrder.quantity && tradeQuantity === sellOrder.quantity ? 'FULL' :
-                                      tradeQuantity === buyOrder.quantity ? 'BUY_FILLED' :
-                                      tradeQuantity === sellOrder.quantity ? 'SELL_FILLED' : 'PARTIAL'
+                                buyer: buyOrder.user_address.slice(0,10) + '...',
+                                seller: sellOrder.user_address.slice(0,10) + '...'
                             });
                             
                             try {
-                                // NOUVEAU: Choisir le bon endpoint selon le mode
-                                // Déterminer le mode de trade (priorité au mode vault pour compatibilité)
-                                const tradeMode = "vault";
-                                const endpoint = "/api/execute-trade";
+                                // ✅ NOUVEAU: D'ABORD EXÉCUTER LES VRAIS TRANSFERTS BLOCKCHAIN
+                                const blockchainResult = await executeBlockchainTransfer(
+                                    buyOrder.user_address,
+                                    sellOrder.user_address,
+                                    assetSymbol,
+                                    tradeQuantity,
+                                    sellOrder.price
+                                );
                                 
-                                console.log(`🎯 Utilisation endpoint: ${endpoint} (mode: ${tradeMode})`);
-                                
-                                // Exécuter le trade sur la blockchain
-                                const response = await fetch(`http://localhost:3001${endpoint}`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        buyerAddress: buyOrder.user_address,
-                                        sellerAddress: sellOrder.user_address,
-                                        assetSymbol: assetSymbol,
-                                        quantity: tradeQuantity,
-                                        price: sellOrder.price
-                                    })
-                                });
-                                
-                                const result = await response.json();
-                                
-                                if (result.success) {
-                                    console.log('✅ Trade exécuté avec succès!');
+                                if (blockchainResult.success) {
+                                    // ✅ SEULEMENT SI BLOCKCHAIN RÉUSSIT: Créer le trade en DB
+                                    const totalAmount = tradeQuantity * sellOrder.price;
                                     
-                                    // Mettre à jour les quantités des ordres
-                                    const newBuyQuantity = buyOrder.quantity - tradeQuantity;
-                                    const newSellQuantity = sellOrder.quantity - tradeQuantity;
-                                    
-                                    // Mettre à jour l'ordre d'achat
-                                    if (newBuyQuantity <= 0) {
-                                        await new Promise((resolve, reject) => {
-                                            db.run(
-                                                'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
-                                                ['filled', buyOrder.id],
-                                                (err) => err ? reject(err) : resolve()
-                                            );
-                                        });
-                                        console.log('🔵 Ordre d\'achat complètement rempli');
-                                    } else {
-                                        await new Promise((resolve, reject) => {
-                                            db.run(
-                                                'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
-                                                [newBuyQuantity, 'partial', buyOrder.id],
-                                                (err) => err ? reject(err) : resolve()
-                                            );
-                                        });
-                                        console.log('🔵 Ordre d\'achat partiellement rempli:', newBuyQuantity, 'restant');
-                                    }
-                                    
-                                    // Mettre à jour l'ordre de vente
-                                    if (newSellQuantity <= 0) {
-                                        await new Promise((resolve, reject) => {
-                                            db.run(
-                                                'UPDATE orders SET status = ?, quantity = 0 WHERE id = ?',
-                                                ['filled', sellOrder.id],
-                                                (err) => err ? reject(err) : resolve()
-                                            );
-                                        });
-                                        console.log('🔴 Ordre de vente complètement rempli');
-                                    } else {
-                                        await new Promise((resolve, reject) => {
-                                            db.run(
-                                                'UPDATE orders SET quantity = ?, status = ? WHERE id = ?',
-                                                [newSellQuantity, 'partial', sellOrder.id],
-                                                (err) => err ? reject(err) : resolve()
-                                            );
-                                        });
-                                        console.log('🔴 Ordre de vente partiellement rempli:', newSellQuantity, 'restant');
-                                    }
-                                    
+                                    db.run(
+                                        'INSERT INTO trades (buyer_address, seller_address, asset_symbol, quantity, price, total_amount) VALUES (?, ?, ?, ?, ?, ?)',
+                                        [buyOrder.user_address, sellOrder.user_address, assetSymbol, tradeQuantity, sellOrder.price, totalAmount],
+                                        function(err) {
+                                            if (err) {
+                                                console.error('❌ Erreur création trade DB:', err);
+                                            } else {
+                                                console.log('✅ Trade exécuté avec succès, ID:', this.lastID);
+                                                
+                                                const trade = {
+                                                    id: this.lastID,
+                                                    buyer_address: buyOrder.user_address,
+                                                    seller_address: sellOrder.user_address,
+                                                    asset_symbol: assetSymbol,
+                                                    quantity: tradeQuantity,
+                                                    price: sellOrder.price,
+                                                    total_amount: totalAmount,
+                                                    created_at: new Date().toISOString(),
+                                                    assetTxHash: blockchainResult.assetTxHash,
+                                                    trgTxHash: blockchainResult.trgTxHash
+                                                };
+                                                
+                                                // Broadcast du trade
+                                                broadcastTradeExecuted(trade);
+                                                
+                                                // Marquer les ordres comme exécutés
+                                                db.run('UPDATE orders SET status = ? WHERE id = ?', ['executed', buyOrder.id]);
+                                                db.run('UPDATE orders SET status = ? WHERE id = ?', ['executed', sellOrder.id]);
+                                                
+                                                // Mettre à jour l'orderbook
+                                                getOrderbook(assetSymbol).then(orderbook => {
+                                                    broadcastOrderbookUpdate(assetSymbol, orderbook);
+                                                });
+                                                
+                                                // Mettre à jour les balances pour les deux utilisateurs
+                                                setTimeout(async () => {
+                                                    try {
+                                                        // Balances acheteur
+                                                        const buyerBalances = await getBalances(buyOrder.user_address);
+                                                        const buyerVaultBalances = await getVaultBalances(buyOrder.user_address);
+                                                        io.to(`user-${buyOrder.user_address}`).emit('balances-update', {
+                                                            walletBalances: buyerBalances,
+                                                            vaultBalances: buyerVaultBalances
+                                                        });
+                                                        
+                                                        // Balances vendeur
+                                                        const sellerBalances = await getBalances(sellOrder.user_address);
+                                                        const sellerVaultBalances = await getVaultBalances(sellOrder.user_address);
+                                                        io.to(`user-${sellOrder.user_address}`).emit('balances-update', {
+                                                            walletBalances: sellerBalances,
+                                                            vaultBalances: sellerVaultBalances
+                                                        });
+                                                        
+                                                        console.log('📡 Balances mises à jour via WebSocket après trade');
+                                                    } catch (error) {
+                                                        console.error('❌ Erreur mise à jour balances post-trade:', error);
+                                                    }
+                                                }, 2000);
+                                            }
+                                        }
+                                    );
                                 } else {
-                                    console.log('❌ Erreur lors du trade:', result.error);
+                                    console.error('❌ Échec transfert blockchain, trade annulé');
                                 }
                                 
                             } catch (error) {
                                 console.error('❌ Erreur exécution trade:', error.message);
                             }
                             
-                            // Continuer à chercher d'autres matches possibles
                             resolve();
                             return;
                         }
                     }
                 }
                 
-                console.log('⏸️ Aucun match trouvé pour', assetSymbol);
+                console.log('🔍 Aucun match trouvé pour', assetSymbol);
                 resolve();
             }
         );
     });
 }
 
-// Route pour exécuter un trade réel sur blockchain (MODE VAULT)
-app.post("/api/execute-trade", async (req, res) => {
-    const { buyerAddress, sellerAddress, assetSymbol, quantity, price } = req.body;
+// Route pour les retraits du vault (VRAIE INTERACTION BLOCKCHAIN)
+
+// 🔥 NOUVELLE ROUTE: Récupérer les ordres affectés par un retrait
+app.post('/api/get-affected-orders', async (req, res) => {
+    const { userAddress, tokenSymbol, withdrawAmount } = req.body;
+    
+    console.log('🔍 Vérification ordres affectés:', { userAddress, tokenSymbol, withdrawAmount });
     
     try {
-        console.log("🔗 Exécution trade (mode vault):", { buyerAddress, sellerAddress, assetSymbol, quantity, price });
+        // Récupérer les balances vault actuelles
+        const vaultBalances = await getVaultBalances(userAddress);
+        const currentBalance = parseFloat(vaultBalances[tokenSymbol] || 0);
+        const remainingAfterWithdraw = currentBalance - parseFloat(withdrawAmount);
         
-        const provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545");
-        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
-        
-        const addressesPath = path.join(__dirname, "deployed-addresses.json");
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, "utf8"));
-        
-        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json"), "utf8")).abi;
-        const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
-        
-        const quantityWei = ethers.utils.parseEther(quantity.toString());
-        const totalPriceWei = ethers.utils.parseEther((quantity * price).toString());
-        
-        console.log("📋 Appel vault.transferFromVault() [MODE VAULT]...");
-        
-        // Transférer asset du vendeur vers acheteur
-        await vaultContract.transferFromVault(
-            addresses[assetSymbol],
-            sellerAddress,
-            buyerAddress,
-            quantityWei
-        );
-        
-        // Transférer payment de acheteur vers vendeur
-        await vaultContract.transferFromVault(
-            addresses.TRG,
-            buyerAddress,
-            sellerAddress,
-            totalPriceWei
-        );
-        
-        console.log("✅ Trade vault exécuté!");
-        
-        // Mettre à jour les ordres
-        await new Promise((resolve, reject) => {
-            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
-                ["filled", assetSymbol, "sell", sellerAddress, "pending"],
-                function(err) { if (err) reject(err); else resolve(); }
+        // Récupérer tous les ordres pending de l'utilisateur
+        const orders = await new Promise((resolve, reject) => {
+            db.all(
+                'SELECT * FROM orders WHERE user_address = ? AND status = ? ORDER BY created_at ASC',
+                [userAddress, 'pending'],
+                (err, rows) => err ? reject(err) : resolve(rows || [])
             );
         });
         
-        await new Promise((resolve, reject) => {
-            db.run("UPDATE orders SET status = ? WHERE asset_symbol = ? AND order_type = ? AND user_address = ? AND status = ?",
-                ["filled", assetSymbol, "buy", buyerAddress, "pending"],
-                function(err) { if (err) reject(err); else resolve(); }
+        // Calculer quels ordres seraient affectés
+        let totalReserved = 0;
+        const affectedOrders = [];
+        
+        for (const order of orders) {
+            let requiredForOrder = 0;
+            
+            if (order.order_type === 'sell' && order.asset_symbol === tokenSymbol) {
+                // Pour ordre SELL: on a besoin de l'asset
+                requiredForOrder = order.quantity;
+            } else if (order.order_type === 'buy' && tokenSymbol === 'TRG') {
+                // Pour ordre BUY: on a besoin de TRG
+                requiredForOrder = order.quantity * order.price;
+            }
+            
+            if (requiredForOrder > 0) {
+                totalReserved += requiredForOrder;
+                
+                // Si après le retrait, on ne peut plus honorer cet ordre
+                if (totalReserved > remainingAfterWithdraw) {
+                    affectedOrders.push(order);
+                }
+            }
+        }
+        
+        res.json({
+            success: true,
+            affectedOrders,
+            summary: {
+                currentBalance,
+                withdrawAmount: parseFloat(withdrawAmount),
+                remainingAfterWithdraw,
+                totalOrdersAffected: affectedOrders.length
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur get-affected-orders:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 🔥 NOUVELLE ROUTE: Annuler des ordres spécifiques
+app.post('/api/cancel-orders', async (req, res) => {
+    const { orderIds } = req.body;
+    
+    console.log('❌ Annulation ordres:', orderIds);
+    
+    try {
+        const placeholders = orderIds.map(() => '?').join(',');
+        
+        const result = await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE orders SET status = 'cancelled' WHERE id IN (${placeholders})`,
+                orderIds,
+                function(err) {
+                    if (err) reject(err);
+                    else resolve({ changes: this.changes });
+                }
             );
         });
         
         res.json({
             success: true,
-            message: "Trade exécuté en mode vault",
-            transactionDetails: {
-                asset: `${quantity} ${assetSymbol}`,
-                payment: `${quantity * price} TRG`,
-                buyer: buyerAddress,
-                seller: sellerAddress
-            }
+            message: `${result.changes} ordres annulés`,
+            cancelledCount: result.changes
+        });
+        
+        // Broadcast mise à jour des orderbooks pour tous les assets affectés
+        // (Tu peux optimiser en récupérant les assets spécifiques)
+        ['CLV', 'ROO', 'GOV'].forEach(async (symbol) => {
+            const orderbook = await getOrderbook(symbol);
+            broadcastOrderbookUpdate(symbol, orderbook);
         });
         
     } catch (error) {
-        console.error("❌ Erreur execution trade:", error);
+        console.error('❌ Erreur cancel-orders:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -537,464 +937,325 @@ app.post("/api/execute-trade", async (req, res) => {
 });
 
 
-// 🔒 NOUVELLE FONCTION POUR MODE APPROBATION
-
-// Route pour retirer des tokens du vault vers le wallet
-app.post('/api/withdraw', async (req, res) => {
-    const { userAddress, tokenSymbol, amount } = req.body;
+// 🔥 NOUVELLE ROUTE: Récupérer les ordres affectés par un retrait
+app.post('/api/get-affected-orders', async (req, res) => {
+    const { userAddress, tokenSymbol, withdrawAmount } = req.body;
+    
+    console.log('🔍 Vérification ordres affectés:', { userAddress, tokenSymbol, withdrawAmount });
     
     try {
-        console.log('💰 Demande de retrait:', { userAddress, tokenSymbol, amount });
+        const vaultBalances = await getVaultBalances(userAddress);
+        const currentBalance = parseFloat(vaultBalances[tokenSymbol] || 0);
+        const remainingAfterWithdraw = currentBalance - parseFloat(withdrawAmount);
         
-        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
-        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        const orders = await new Promise((resolve, reject) => {
+            db.all(
+                'SELECT * FROM orders WHERE user_address = ? AND status = ? ORDER BY created_at ASC',
+                [userAddress, 'pending'],
+                (err, rows) => err ? reject(err) : resolve(rows || [])
+            );
+        });
         
-        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
-        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        let totalReserved = 0;
+        const affectedOrders = [];
         
-        const vaultABI = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/artifacts/contracts/TradingVault.sol/TradingVault.json'), 'utf8')).abi;
-        const vault = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
-        
-        const amountWei = ethers.utils.parseUnits(amount.toString(), 18);
-        
-        // Appeler operateWithdrawal du vault
-        const tx = await vault.operateWithdrawal(userAddress, addresses[tokenSymbol], amountWei);
-        await tx.wait();
-        
-        console.log('✅ Retrait exécuté:', tx.hash);
+        for (const order of orders) {
+            let requiredForOrder = 0;
+            
+            if (order.order_type === 'sell' && order.asset_symbol === tokenSymbol) {
+                requiredForOrder = order.quantity;
+            } else if (order.order_type === 'buy' && tokenSymbol === 'TRG') {
+                requiredForOrder = order.quantity * order.price;
+            }
+            
+            if (requiredForOrder > 0) {
+                totalReserved += requiredForOrder;
+                if (totalReserved > remainingAfterWithdraw) {
+                    affectedOrders.push(order);
+                }
+            }
+        }
         
         res.json({
             success: true,
-            message: 'Retrait exécuté avec succès',
-            txHash: tx.hash
+            affectedOrders,
+            summary: {
+                currentBalance,
+                withdrawAmount: parseFloat(withdrawAmount),
+                remainingAfterWithdraw,
+                totalOrdersAffected: affectedOrders.length
+            }
         });
         
     } catch (error) {
-        console.error('❌ Erreur retrait:', error);
+        console.error('❌ Erreur get-affected-orders:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Route pour récupérer les données d'un asset
-app.get('/api/assets/:symbol', (req, res) => {
-    const { symbol } = req.params;
+// 🔥 NOUVELLE ROUTE: Annuler des ordres spécifiques
+app.post('/api/cancel-orders', async (req, res) => {
+    const { orderIds } = req.body;
     
-    const assetData = {
-        CLV: {
-            symbol: 'CLV',
-            name: 'Clove Company',
-            type: 'share',
-            currentPrice: 10,
-            description: 'Actions de Clove Company',
-            totalSupply: 100
-        },
-        ROO: {
-            symbol: 'ROO', 
-            name: 'Rooibos Limited',
-            type: 'share',
-            currentPrice: 10,
-            description: 'Actions de Rooibos Limited',
-            totalSupply: 100
-        },
-        GOV: {
-            symbol: 'GOV',
-            name: 'Government Bonds',
-            type: 'bond',
-            currentPrice: 200,
-            description: 'Obligations gouvernementales (10% intérêt, 1 an)',
-            totalSupply: 20
-        }
-    };
+    console.log('❌ Annulation ordres:', orderIds);
     
-    const asset = assetData[symbol];
-    
-    if (asset) {
-        res.json({ success: true, asset: asset });
-    } else {
-        res.status(404).json({ success: false, error: `Asset ${symbol} non trouvé` });
-    }
-});
-
-// Route pour récupérer le carnet d'ordres (orderbook)
-app.get('/api/orderbook/:symbol', (req, res) => {
-    const { symbol } = req.params;
-    
-    console.log('📊 Récupération orderbook pour:', symbol);
-    
-    db.all(
-        'SELECT * FROM orders WHERE asset_symbol = ? AND status = ? ORDER BY price DESC, created_at ASC',
-        [symbol, 'pending'],
-        (err, orders) => {
-            if (err) {
-                console.error('❌ Erreur orderbook:', err);
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                const buyOrders = orders.filter(o => o.order_type === 'buy');
-                const sellOrders = orders.filter(o => o.order_type === 'sell');
-                
-                console.log('📈 Orderbook', symbol, '- Buy:', buyOrders.length, 'Sell:', sellOrders.length);
-                
-                res.json({
-                    success: true,
-                    orderbook: {
-                        symbol: symbol,
-                        buyOrders: buyOrders,
-                        sellOrders: sellOrders,
-                        totalOrders: orders.length
-                    }
-                });
-            }
-        }
-    );
-});
-
-// Route pour récupérer l'historique des trades d'un utilisateur
-app.get('/api/trades/:userAddress', (req, res) => {
-    const { userAddress } = req.params;
-    
-    db.all(
-        `SELECT * FROM trades 
-         WHERE buyer_address = ? OR seller_address = ? 
-         ORDER BY created_at DESC 
-         LIMIT 50`,
-        [userAddress, userAddress],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                const trades = rows.map(trade => ({
-                    ...trade,
-                    side: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() ? 'buy' : 'sell',
-                    counterparty: trade.buyer_address.toLowerCase() === userAddress.toLowerCase() 
-                        ? trade.seller_address 
-                        : trade.buyer_address
-                }));
-                
-                res.json({ 
-                    success: true, 
-                    trades: trades,
-                    total: rows.length 
-                });
-            }
-        }
-    );
-});
-
-// Route pour l'historique global des trades par asset
-app.get('/api/trades/asset/:symbol', (req, res) => {
-    const { symbol } = req.params;
-    
-    db.all(
-        'SELECT * FROM trades WHERE asset_symbol = ? ORDER BY created_at DESC LIMIT 20',
-        [symbol],
-        (err, rows) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else {
-                res.json({ success: true, trades: rows });
-            }
-        }
-    );
-});
-
-// Route pour vérifier si un utilisateur est inscrit
-app.get('/api/check-registration/:address', (req, res) => {
-    const { address } = req.params;
-    
-    db.get(
-        'SELECT * FROM users WHERE wallet_address = ?',
-        [address],
-        (err, row) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else if (row) {
-                res.json({ 
-                    success: true, 
-                    registered: true, 
-                    user: { 
-                        wallet_address: row.wallet_address,
-                        legal_name: row.legal_name,
-                        created_at: row.created_at
-                    }
-                });
-            } else {
-                res.json({ success: true, registered: false });
-            }
-        }
-    );
-});
-
-// Route pour annuler un ordre
-app.post('/api/cancel-order/:orderId', (req, res) => {
-    const { orderId } = req.params;
-    const { userAddress } = req.body;
-    
-    console.log('❌ Demande annulation ordre:', orderId, 'par', userAddress);
-    
-    db.get(
-        'SELECT * FROM orders WHERE id = ? AND user_address = ? AND status = ?',
-        [orderId, userAddress, 'pending'],
-        (err, order) => {
-            if (err) {
-                res.status(500).json({ success: false, error: err.message });
-            } else if (!order) {
-                res.status(404).json({ success: false, error: 'Ordre non trouvé ou non annulable' });
-            } else {
-                db.run(
-                    'UPDATE orders SET status = ? WHERE id = ?',
-                    ['cancelled', orderId],
-                    function(err) {
-                        if (err) {
-                            res.status(500).json({ success: false, error: err.message });
-                        } else {
-                            console.log('✅ Ordre annulé:', orderId);
-                            res.json({ 
-                                success: true, 
-                                message: 'Ordre annulé avec succès',
-                                orderId: orderId
-                            });
-                        }
-                    }
-                );
-            }
-        }
-    );
-});
-
-// Route pour obtenir les statistiques de trading
-app.get('/api/stats/:symbol', (req, res) => {
-    const { symbol } = req.params;
-    
-    Promise.all([
-        // Volume des dernières 24h
-        new Promise((resolve, reject) => {
-            db.get(
-                `SELECT SUM(total_amount) as volume24h, COUNT(*) as trades24h 
-                 FROM trades 
-                 WHERE asset_symbol = ? AND created_at > datetime('now', '-1 day')`,
-                [symbol],
-                (err, row) => err ? reject(err) : resolve(row)
-            );
-        }),
-        // Prix du dernier trade
-        new Promise((resolve, reject) => {
-            db.get(
-                'SELECT price FROM trades WHERE asset_symbol = ? ORDER BY created_at DESC LIMIT 1',
-                [symbol],
-                (err, row) => err ? reject(err) : resolve(row)
-            );
-        }),
-        // Ordres en cours
-        new Promise((resolve, reject) => {
-            db.all(
-                'SELECT order_type, COUNT(*) as count, SUM(quantity) as total_quantity FROM orders WHERE asset_symbol = ? AND status = ? GROUP BY order_type',
-                [symbol, 'pending'],
-                (err, rows) => err ? reject(err) : resolve(rows)
-            );
-        })
-    ]).then(([volume24h, lastPrice, pendingOrders]) => {
-        const stats = {
-            symbol: symbol,
-            volume24h: volume24h.volume24h || 0,
-            trades24h: volume24h.trades24h || 0,
-            lastPrice: lastPrice ? lastPrice.price : null,
-            pendingOrders: pendingOrders.reduce((acc, order) => {
-                acc[order.order_type] = {
-                    count: order.count,
-                    totalQuantity: order.total_quantity
-                };
-                return acc;
-            }, {})
-        };
+    try {
+        const placeholders = orderIds.map(() => '?').join(',');
         
-        res.json({ success: true, stats: stats });
-    }).catch(error => {
-        console.error('❌ Erreur stats:', error);
-        res.status(500).json({ success: false, error: error.message });
-    });
-});
-
-// ======== FONCTIONS UTILITAIRES ========
-
-// Fonction pour nettoyer les ordres expirés
-function cleanupExpiredOrders() {
-    const expiredTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 heures
-    
-    db.run(
-        'UPDATE orders SET status = ? WHERE created_at < ? AND status = ?',
-        ['expired', expiredTime.toISOString(), 'pending'],
-        function(err) {
-            if (err) {
-                console.error('❌ Erreur nettoyage ordres expirés:', err);
-            } else if (this.changes > 0) {
-                console.log('🧹 Ordres expirés nettoyés:', this.changes);
-            }
-        }
-    );
-}
-
-// Fonction pour calculer le prix moyen pondéré
-function calculateVWAP(symbol, hours = 24) {
-    return new Promise((resolve, reject) => {
-        db.get(
-            `SELECT 
-                SUM(total_amount) / SUM(quantity) as vwap,
-                COUNT(*) as trade_count
-             FROM trades 
-             WHERE asset_symbol = ? AND created_at > datetime('now', '-${hours} hours')`,
-            [symbol],
-            (err, row) => {
-                if (err) reject(err);
-                else resolve(row);
-            }
-        );
-    });
-}
-
-// Nettoyer les ordres expirés toutes les heures
-setInterval(cleanupExpiredOrders, 60 * 60 * 1000);
-
-// ======== ROUTES ADMIN ========
-
-// Route pour obtenir des statistiques globales (admin)
-app.get('/api/admin/global-stats', (req, res) => {
-    Promise.all([
-        new Promise((resolve, reject) => {
-            db.get('SELECT COUNT(*) as total_users FROM users', (err, row) => 
-                err ? reject(err) : resolve(row));
-        }),
-        new Promise((resolve, reject) => {
-            db.get('SELECT COUNT(*) as total_orders FROM orders', (err, row) => 
-                err ? reject(err) : resolve(row));
-        }),
-        new Promise((resolve, reject) => {
-            db.get('SELECT COUNT(*) as total_trades, SUM(total_amount) as total_volume FROM trades', (err, row) => 
-                err ? reject(err) : resolve(row));
-        }),
-        new Promise((resolve, reject) => {
-            db.all('SELECT asset_symbol, COUNT(*) as count FROM trades GROUP BY asset_symbol', (err, rows) => 
-                err ? reject(err) : resolve(rows));
-        })
-    ]).then(([users, orders, trades, assetStats]) => {
+        const result = await new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE orders SET status = 'cancelled' WHERE id IN (${placeholders})`,
+                orderIds,
+                function(err) {
+                    if (err) reject(err);
+                    else resolve({ changes: this.changes });
+                }
+            );
+        });
+        
         res.json({
             success: true,
-            globalStats: {
-                totalUsers: users.total_users,
-                totalOrders: orders.total_orders,
-                totalTrades: trades.total_trades,
-                totalVolume: trades.total_volume || 0,
-                assetStats: assetStats
+            message: `${result.changes} ordres annulés`,
+            cancelledCount: result.changes
+        });
+        
+        ['CLV', 'ROO', 'GOV'].forEach(async (symbol) => {
+            const orderbook = await getOrderbook(symbol);
+            broadcastOrderbookUpdate(symbol, orderbook);
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur cancel-orders:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+// 🔥 ROUTE: Ordres affectés par retrait
+app.post('/api/get-affected-orders', async (req, res) => {
+    const { userAddress, tokenSymbol, withdrawAmount } = req.body;
+    
+    try {
+        const vaultBalances = await getVaultBalances(userAddress);
+        const currentBalance = parseFloat(vaultBalances[tokenSymbol] || 0);
+        const remainingAfterWithdraw = currentBalance - parseFloat(withdrawAmount);
+        
+        const orders = await new Promise((resolve, reject) => {
+            db.all(
+                'SELECT * FROM orders WHERE user_address = ? AND status = ? ORDER BY created_at ASC',
+                [userAddress, 'pending'],
+                (err, rows) => err ? reject(err) : resolve(rows || [])
+            );
+        });
+        
+        let totalReserved = 0;
+        const affectedOrders = [];
+        
+        for (const order of orders) {
+            let requiredForOrder = 0;
+            
+            if (order.order_type === 'sell' && order.asset_symbol === tokenSymbol) {
+                requiredForOrder = order.quantity;
+            } else if (order.order_type === 'buy' && tokenSymbol === 'TRG') {
+                requiredForOrder = order.quantity * order.price;
+            }
+            
+            if (requiredForOrder > 0) {
+                totalReserved += requiredForOrder;
+                if (totalReserved > remainingAfterWithdraw) {
+                    affectedOrders.push(order);
+                }
+            }
+        }
+        
+        res.json({
+            success: true,
+            affectedOrders,
+            summary: { currentBalance, withdrawAmount: parseFloat(withdrawAmount), remainingAfterWithdraw, totalOrdersAffected: affectedOrders.length }
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur get-affected-orders:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 🔥 ROUTE: Annuler ordres
+app.post('/api/cancel-orders', async (req, res) => {
+    const { orderIds } = req.body;
+    
+    try {
+        const placeholders = orderIds.map(() => '?').join(',');
+        const result = await new Promise((resolve, reject) => {
+            db.run(`UPDATE orders SET status = 'cancelled' WHERE id IN (${placeholders})`, orderIds, function(err) {
+                if (err) reject(err);
+                else resolve({ changes: this.changes });
+            });
+        });
+        
+        res.json({ success: true, message: `${result.changes} ordres annulés`, cancelledCount: result.changes });
+        
+        ['CLV', 'ROO', 'GOV'].forEach(async (symbol) => {
+            const orderbook = await getOrderbook(symbol);
+            broadcastOrderbookUpdate(symbol, orderbook);
+        });
+        
+    } catch (error) {
+        console.error('❌ Erreur cancel-orders:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+app.post('/api/withdraw', async (req, res) => {
+    const { userAddress, tokenSymbol, amount } = req.body;
+    
+    console.log('💸 Demande de retrait RÉEL:', { userAddress, tokenSymbol, amount });
+    
+    // Validation des données
+    if (!userAddress || !tokenSymbol || !amount) {
+        return res.status(400).json({
+            success: false,
+            error: 'Tous les champs sont requis'
+        });
+    }
+    
+    if (amount <= 0) {
+        return res.status(400).json({
+            success: false,
+            error: 'Le montant doit être positif'
+        });
+    }
+    
+    try {
+        const provider = new ethers.providers.JsonRpcProvider('http://127.0.0.1:8545');
+        const addressesPath = path.join(__dirname, 'deployed-addresses.json');
+        
+        if (!fs.existsSync(addressesPath)) {
+            return res.status(500).json({
+                success: false,
+                error: 'Contrats non déployés'
+            });
+        }
+        
+        const addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+        
+        // Clé privée du deployer (owner du vault)
+        const deployerPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        const wallet = new ethers.Wallet(deployerPrivateKey, provider);
+        
+        // ABI du vault (fonction operateWithdrawal)
+        const vaultABI = [
+            "function operateWithdrawal(address user, address token, uint256 amount) external",
+            "function getBalance(address token, address user) external view returns (uint256)"
+        ];
+        
+        const vaultContract = new ethers.Contract(addresses.TradingVault, vaultABI, wallet);
+        
+        // Vérifier que l'utilisateur a assez de fonds dans le vault
+        const currentBalance = await vaultContract.getBalance(addresses[tokenSymbol], userAddress);
+        const amountWei = ethers.utils.parseEther(amount.toString());
+        
+        if (currentBalance.lt(amountWei)) {
+            return res.status(400).json({
+                success: false,
+                error: `Solde insuffisant dans le vault. Disponible: ${ethers.utils.formatEther(currentBalance)} ${tokenSymbol}`
+            });
+        }
+        
+        console.log('🔗 Exécution operateWithdrawal sur la blockchain...');
+        console.log('📍 Vault:', addresses.TradingVault);
+        console.log('👤 User:', userAddress);
+        console.log('🪙 Token:', addresses[tokenSymbol]);
+        console.log('💰 Amount:', ethers.utils.formatEther(amountWei), tokenSymbol);
+        
+        // Exécuter le retrait sur la blockchain
+        const tx = await vaultContract.operateWithdrawal(
+            userAddress,
+            addresses[tokenSymbol],
+            amountWei
+        );
+        
+        console.log('⏳ Transaction envoyée:', tx.hash);
+        console.log('⏳ Attente de confirmation...');
+        
+        // Attendre la confirmation de la transaction
+        const receipt = await tx.wait();
+        
+        console.log('✅ Retrait confirmé sur la blockchain!');
+        console.log('📋 Gas utilisé:', receipt.gasUsed.toString());
+        
+        res.json({
+            success: true,
+            message: `Retrait de ${amount} ${tokenSymbol} exécuté avec succès`,
+            transaction: {
+                hash: tx.hash,
+                blockNumber: receipt.blockNumber,
+                gasUsed: receipt.gasUsed.toString(),
+                amount: amount,
+                token: tokenSymbol,
+                to: userAddress
             }
         });
-    }).catch(error => {
-        console.error('❌ Erreur stats globales:', error);
-        res.status(500).json({ success: false, error: error.message });
-    });
+        
+        // Broadcast de la mise à jour des balances via WebSocket (après délai)
+        setTimeout(async () => {
+            try {
+                const balances = await getBalances(userAddress);
+                const vaultBalances = await getVaultBalances(userAddress);
+                
+                io.to(`user-${userAddress}`).emit('balances-update', {
+                    walletBalances: balances,
+                    vaultBalances: vaultBalances
+                });
+                
+                console.log('📡 Balances mises à jour via WebSocket pour:', userAddress);
+            } catch (error) {
+                console.error('❌ Erreur mise à jour balances:', error);
+            }
+        }, 2000);
+        
+    } catch (error) {
+        console.error('❌ Erreur retrait blockchain:', error);
+        
+        let errorMessage = 'Erreur lors du retrait';
+        if (error.message.includes('insufficient funds')) {
+            errorMessage = 'Fonds insuffisants dans le vault';
+        } else if (error.message.includes('revert')) {
+            errorMessage = 'Transaction rejetée par le smart contract';
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: errorMessage,
+            details: error.message
+        });
+    }
 });
 
-// ======== MIDDLEWARE DE GESTION D'ERREUR ========
-
-// Middleware pour capturer les erreurs 404
-app.use('*', (req, res) => {
-    res.status(404).json({
-        success: false,
-        error: 'Endpoint non trouvé',
-        availableEndpoints: [
-            'GET /api/test',
-            'POST /api/register',
-            'GET /api/balances/:address',
-            'GET /api/vault-balances/:address',
-            'POST /api/orders',
-            'GET /api/orderbook/:symbol',
-            'POST /api/withdraw',
-            'GET /api/trades/:userAddress',
-            'GET /api/stats/:symbol'
-        ]
-    });
-});
-
-// Middleware pour capturer les erreurs générales
-app.use((err, req, res, next) => {
-    console.error('❌ Erreur serveur:', err);
-    res.status(500).json({
-        success: false,
-        error: 'Erreur interne du serveur',
-        message: process.env.NODE_ENV === 'development' ? err.message : 'Une erreur est survenue'
-    });
-});
-
-// ======== DÉMARRAGE DU SERVEUR ========
-
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`
 🚀 ====================================
-   SERVEUR BACKEND DÉMARRÉ
+   SERVEUR WEBSOCKET COMPLET DÉMARRÉ
 🚀 ====================================
 
 📍 URL: http://localhost:${PORT}
 📋 API Test: http://localhost:${PORT}/api/test
+🔌 WebSocket: ws://localhost:${PORT}
 
-⚙️ MODE VAULT ACTIVÉ:
-   🏦 Mode Vault: /api/orders
+⚡ WEBSOCKET + BALANCES ACTIVÉS:
+   🔄 Mises à jour en temps réel
+   📊 Orderbook live
+   💰 Balances blockchain
+   🏦 Vault balances
+   📈 Trades en direct
 
-📊 ENDPOINTS PRINCIPAUX:
-   GET  /api/balances/:address - Balances wallet
-   GET  /api/vault-balances/:address - Balances vault  
-   POST /api/withdraw - Retrait du vault
-   GET  /api/orderbook/:symbol - Carnet d'ordres
-   GET  /api/trades/:userAddress - Historique trades
-   GET  /api/stats/:symbol - Statistiques trading
-
-🛡️ SÉCURITÉ:
-   ✅ CORS activé
-   ✅ Validation des entrées
-   ✅ Gestion d'erreurs complète
-   ✅ Cleanup automatique
-
-🎯 PRÊT POUR L'AUDIT!
+🎯 PRÊT POUR L'AUDIT COMPLET!
 ====================================`);
 });
 
-// ======== GESTION D'ERREUR GLOBALE ========
-
-process.on('uncaughtException', (err) => {
-    console.error('❌ Erreur non gérée:', err);
-    console.log('🔄 Redémarrage du serveur recommandé');
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Promise rejetée non gérée:', reason);
-    console.log('🔄 Vérifiez les connexions async');
-});
-
-// Fonction de fermeture propre
 process.on('SIGINT', () => {
-    console.log('\n🛑 Arrêt du serveur demandé...');
-    db.close((err) => {
-        if (err) {
-            console.error('❌ Erreur fermeture DB:', err);
-        } else {
-            console.log('✅ Base de données fermée proprement');
-        }
-        process.exit(0);
-    });
+    console.log('\n🛑 Arrêt du serveur...');
+    db.close();
+    process.exit(0);
 });
 
-// Export pour les tests
-
-// 🔄 MATCHING AUTOMATIQUE CONTINU
-setInterval(async () => {
-    console.log("🔄 Vérification automatique des matches...");
-    const assets = ["CLV", "ROO", "GOV"];
-    for (const asset of assets) {
-        try {
-            await matchOrders(asset);
-        } catch (error) {
-            console.error(`❌ Erreur matching automatique ${asset}:`, error.message);
-        }
-    }
-}, 5000);
-
-console.log("🤖 Matching automatique activé - Vérification toutes les 5 secondes");
 module.exports = app;
