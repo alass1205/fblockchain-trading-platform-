@@ -12,7 +12,7 @@
 ### 1. Cloner et configurer le projet
 
 ```bash
-git clone <repository-url>
+git clone https://learn.zone01dakar.sn/git/alassall/financial-instruments
 cd blockchain-trading-platform
 
 # Installation des dépendances principales

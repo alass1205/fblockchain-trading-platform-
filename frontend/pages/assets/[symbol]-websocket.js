@@ -221,8 +221,13 @@ export default function ModernAssetPageWebSocket() {
                 alert(`❌ Solde wallet insuffisant! Vous avez ${walletBalance} ${token}, mais ${amount} requis.`);
                 setDepositing(false);
                 return;
-            }
-            
+        // 🏛️ EXCLUSION GOV: Les bonds ne peuvent pas être déposés dans le vault
+        if (token === 'GOV') {
+            alert("❌ GOV bonds cannot be deposited in vault - Special maturity instruments - Use wallet trading only");
+            setDepositing(false);
+            return;
+        }
+        }
             console.log('🏦 Dépôt vault:', { token, amount });
             
             const tokenContract = new ethers.Contract(CONTRACT_ADDRESSES[token], 

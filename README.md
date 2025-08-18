@@ -7,7 +7,7 @@ Plateforme de trading d'instruments financiers sur blockchain privée avec stabl
 
 ### 1. Installation
 ```bash
-git clone <repository-url>
+git clone https://learn.zone01dakar.sn/git/alassall/financial-instruments
 cd blockchain-trading-platform
 npm run install-all
 ```

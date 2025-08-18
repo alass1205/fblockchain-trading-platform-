@@ -1,0 +1,8 @@
+    // 🏛️ REDIRECTION GOV: Éviter complètement les erreurs de gas
+    useEffect(() => {
+        if (symbol === 'GOV') {
+            alert("❌ Obligations GOV: Trading avec vault non autorisé\n🏛️ Les obligations gouvernementales sont des instruments à échéance fixe\n💡 Cette plateforme supporte uniquement TRG, CLV et ROO pour le trading avec vault");
+            router.push('/portfolio');
+        }
+    }, [symbol, router]);
+

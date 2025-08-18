@@ -409,7 +409,7 @@ export default function ModernPortfolioWebSocket() {
                             </div>
 
                             {/* Withdraw Button */}
-                            {vaultAmount > 0 && (
+                            {vaultAmount > 0 && asset !== 'GOV' && (
                                 <button
                                     onClick={() => {
                                         const amount = prompt(`How much ${asset} to withdraw? (Max: ${vaultAmount})`);
@@ -434,6 +434,42 @@ export default function ModernPortfolioWebSocket() {
                                 >
                                     {withdrawing[asset] ? 'Withdrawing...' : `Withdraw ${asset}`}
                                 </button>
+                            )}
+
+                            {/* GOV Explanation */}
+                            {asset === 'GOV' && vaultAmount > 0 && (
+                                <div style={{
+                                    padding: '12px',
+                                    background: 'rgba(255, 185, 0, 0.2)',
+                                    border: '1px solid #ffb900',
+                                    borderRadius: '8px',
+                                    marginBottom: '15px'
+                                }}>
+                                    <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '5px' }}>
+                                        🏛️ Notice Spéciale - Obligations d'État
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.8)' }}>
+                                        Les obligations GOV ne peuvent pas être déposées/retirées du vault en raison de leur nature spéciale avec échéance. Tradez directement depuis le wallet.
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* GOV Explanation */}
+                            {asset === 'GOV' && vaultAmount > 0 && (
+                                <div style={{
+                                    padding: '12px',
+                                    background: 'rgba(255, 185, 0, 0.2)',
+                                    border: '1px solid #ffb900',
+                                    borderRadius: '8px',
+                                    marginBottom: '15px'
+                                }}>
+                                    <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '5px' }}>
+                                        🏛️ Government Bonds Special Notice
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.8)' }}>
+                                        GOV bonds cannot be deposited/withdrawn from vault due to their special maturity-based nature. Trade directly from wallet.
+                                    </div>
+                                </div>
                             )}
 
                             {/* Trading Button */}

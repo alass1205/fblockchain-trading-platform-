@@ -18,6 +18,13 @@ export default function ModernAssetPageWebSocket() {
     const [price, setPrice] = useState('');
     const [creating, setCreating] = useState(false);
     const [depositing, setDepositing] = useState(false);
+    // 🚨 PROTECTION GOV: Redirection immédiate pour éviter toute erreur
+    if (symbol === 'GOV') {
+        useEffect(() => {
+            alert("❌ Obligations GOV: Non supportées pour le trading vault\n🏛️ Redirection vers le portfolio...");
+            router.push('/portfolio');
+        }, []);
+    }
     
     // 🔥 NOUVEAU: État pour les notifications de matching
     const [notification, setNotification] = useState('');
@@ -46,6 +53,15 @@ export default function ModernAssetPageWebSocket() {
         }
     }, [symbol]);
 
+
+    // 🚨 GOV REDIRECT: Éviter complètement l'interface GOV
+    useEffect(() => {
+        if (symbol === 'GOV') {
+            alert("❌ Obligations GOV: Interface non disponible\n🏛️ Trading GOV non supporté avec vault\n🔄 Redirection vers portfolio...");
+            router.push('/portfolio');
+            return;
+        }
+    }, [symbol, router]);
     // 🔥 NOUVEAU: Demander l'orderbook spécifique via WebSocket
     useEffect(() => {
         if (socket && symbol && wsConnected) {
@@ -221,8 +237,13 @@ export default function ModernAssetPageWebSocket() {
                 alert(`❌ Solde wallet insuffisant! Vous avez ${walletBalance} ${token}, mais ${amount} requis.`);
                 setDepositing(false);
                 return;
-            }
-            
+        // 🏛️ EXCLUSION GOV: Les bonds ne peuvent pas être déposés dans le vault
+        if (token === 'GOV') {
+            alert("❌ GOV bonds cannot be deposited in vault - Special maturity instruments - Use wallet trading only");
+            setDepositing(false);
+            return;
+        }
+        }
             console.log('🏦 Dépôt vault:', { token, amount });
             
             const tokenContract = new ethers.Contract(CONTRACT_ADDRESSES[token], 
@@ -284,6 +305,12 @@ export default function ModernAssetPageWebSocket() {
             return;
         }
 
+        
+        // 🏛️ EXCLUSION GOV: Aucun ordre GOV avec vault (BUY ou SELL)
+        if (symbol === 'GOV') {
+            alert("❌ Obligations GOV: Trading avec vault non autorisé\n🏛️ Les obligations gouvernementales sont des instruments à échéance fixe\n💡 Cette plateforme supporte uniquement TRG, CLV et ROO pour le trading avec vault");
+            return;
+        }
         const funds = getRequiredFunds();
         if (!funds.sufficient) {
             alert(`❌ Fonds vault insuffisants! Vous avez ${funds.available} ${funds.token}, mais ${funds.amount} requis. Déposez d'abord dans le vault.`);
